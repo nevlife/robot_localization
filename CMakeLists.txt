@@ -346,8 +346,14 @@ install(DIRECTORY
 install(DIRECTORY
   params
   launch
+  scripts
   DESTINATION share/${PROJECT_NAME}
   USE_SOURCE_PERMISSIONS
+)
+
+install(PROGRAMS
+  scripts/gps_covariance_filter.py
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 ament_export_include_directories(include)

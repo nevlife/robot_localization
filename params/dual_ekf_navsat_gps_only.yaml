@@ -122,7 +122,16 @@ ekf_filter_node_map:
     odom0_nodelay: false
     odom0_differential: false
     odom0_relative: false
-    odom0_pose_rejection_threshold: 0.1
+    # Mahalanobis distance² 기준 이상값 거부 (chi-squared 분포, 자유도=2)
+    # 거부 기준 거리 = sqrt(threshold × GPS공분산)
+    # RTK Fix (cov≈0.01m²) 기준:
+    #   5.99  → ~0.24m 이상 점프 시 거부  (95% 신뢰구간)
+    #   10.0  → ~0.32m 이상 점프 시 거부  (99.3% 신뢰구간)
+    #   50.0  → ~0.71m 이상 점프 시 거부
+    #   100.0 → ~1.00m 이상 점프 시 거부
+    # * 공분산 필터(0.5m²)가 앞단에서 나쁜 GPS를 차단하므로
+    #   여기서는 위치 점프만 잡으면 됨 → 10.0 권장
+    odom0_pose_rejection_threshold: 10.0
 
     imu0: /vectornav/imu
     imu0_config: [false, false, false,
