@@ -1,0 +1,18 @@
+gps_manager:
+  ros__parameters:
+
+    # GPS 품질 분류 기준 (수평 공분산 max(cov_x, cov_y), m²)
+    # two_d_mode: true 이므로 수평(x,y)만 기준으로 삼음
+    #
+    # RTK Fix  : σ ~1~2cm   → cov ~0.0001~0.0004  → 임계값 0.01  (σ=10cm)
+    # RTK Float: σ ~5~30cm  → cov ~0.0025~0.09    → 임계값 0.10  (σ=31cm)
+    # DGPS     : σ ~0.5~1m  → cov ~0.25~1.0       → 임계값 1.0   (σ=1m)
+    # Single   : σ ~2~5m    → cov >  1.0
+    rtk_fix_threshold:   0.01
+    rtk_float_threshold: 0.10
+    dgps_threshold:      1.0
+
+    # SetPose 트리거 조건
+    reset_cov_threshold:   0.01   # RTK Fix 수준일 때만 리셋 허용 (σ=10cm)
+    reset_drift_threshold: 2.0    # map EKF와 GPS 위치 차이가 이 거리(m) 이상일 때 리셋
+    reset_cooldown:        10.0   # 연속 리셋 방지: 마지막 리셋 후 최소 대기 시간(s)

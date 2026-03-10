@@ -56,17 +56,10 @@ def generate_launch_description():
             name='navsat_transform',
 	        output='screen',
             parameters=[parameters_file_path],
-            remappings=[('imu/data', '/vectornav/imu'),
+            remappings=[('imu', '/vectornav/imu'),
                         ('gps/fix', '/ublox_gps_node/fix'),
                         ('gps/filtered', 'gps/filtered'),
-                        ('odometry/gps', 'odometry/gps_raw'),
+                        ('odometry/gps', 'odometry/gps'),
                         ('odometry/filtered', 'odometry/global')]
            ),
-    launch_ros.actions.Node(
-            package='robot_localization',
-            executable='gps_covariance_filter.py',
-            name='gps_covariance_filter',
-            output='screen',
-            parameters=[{'cov_threshold': 0.5}]
-           )
 ])

@@ -352,7 +352,7 @@ install(DIRECTORY
 )
 
 install(PROGRAMS
-  scripts/gps_covariance_filter.py
+  scripts/gps_manager.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
