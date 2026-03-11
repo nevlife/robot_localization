@@ -24,7 +24,7 @@ from ament_index_python.packages import get_package_share_directory
 def generate_launch_description():
     robot_localization_dir = get_package_share_directory('robot_localization')
     parameters_file_dir = os.path.join(robot_localization_dir, 'params')
-    parameters_file_path = os.path.join(parameters_file_dir, 'dual_ekf_navsat.yaml')
+    parameters_file_path = os.path.join(parameters_file_dir, 'dual_ekf_navsat_simple.yaml')
     os.environ['FILE_PATH'] = str(parameters_file_dir)
     return LaunchDescription([
         launch.actions.DeclareLaunchArgument(
