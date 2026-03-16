@@ -2,7 +2,7 @@ ekf_filter_node_odom:
   ros__parameters:
     publish_tf: true
     use_sim_time: false
-    frequency: 50.0
+    frequency: 30.0
     sensor_timeout: 0.1
     two_d_mode: true
     transform_time_offset: 0.0
@@ -92,7 +92,7 @@ ekf_filter_node_map:
   ros__parameters:
     publish_tf: true
     use_sim_time: false
-    frequency: 30.0
+    frequency: 10.0
     sensor_timeout: 0.1
     two_d_mode: true
     transform_time_offset: 0.0
@@ -197,7 +197,7 @@ navsat_transform:
     frequency: 30.0
     delay: 0.1
     magnetic_declination_radians: -0.14993 #자기편각 : -0.14993rad, 35.913740° N, 128.803957° E # GPS는 진북 IMU는 자북 기준 navsat_transform은 IMU yaw = 0이 동쪽을 가리킨다고 가정
-    yaw_offset: 0
+    yaw_offset: 1.14816 # = -(imu_yaw_east + mag_decl + meridian_conv) = -(-0.99622 + (-0.14993) + (-0.00201))
     zero_altitude: true
     broadcast_utm_transform: false
     publish_filtered_gps: true
