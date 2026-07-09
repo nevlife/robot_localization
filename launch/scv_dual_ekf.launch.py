@@ -34,6 +34,13 @@ def generate_launch_description():
         DeclareLaunchArgument('use_sim_time', default_value='false'),
         DeclareLaunchArgument('params_file', default_value=default_params),
         DeclareLaunchArgument(
+            'publish_antenna_tf', default_value='false',
+            description='base_link->gnss_antenna static TF. The hunter URDF '
+                        'ALREADY publishes it (measured: +0.020, 0.000, '
+                        '+0.795) — leave false on the vehicle to avoid a '
+                        'duplicate publisher; set true only for bag replay '
+                        'without /tf_static.'),
+        DeclareLaunchArgument(
             'with_fastlio', default_value='true',
             description='Start FAST-LIO here (false when it runs elsewhere '
                         'or when replaying a bag that already contains '
@@ -52,16 +59,19 @@ def generate_launch_description():
             condition=IfCondition(with_fastlio),
         ),
 
-        # GNSS antenna static TF — the ublox NavSatFix frame_id is
-        # 'gnss_antenna'; navsat_transform refuses to compute GPS odometry
-        # without base_link->antenna. Offsets are the antenna mount position
-        # (measure on the vehicle; x/y matter, z is zeroed anyway).
+        # GNSS antenna static TF fallback. navsat_transform refuses to
+        # compute GPS odometry without base_link->gnss_antenna (NavSatFix
+        # frame_id). On the real vehicle the hunter URDF publishes it
+        # (base_link -> sensors_base_link -> gnss_antenna = +0.020, 0.000,
+        # +0.795 — verified from the bag /tf_static), so this fallback stays
+        # OFF by default and exists for URDF-less bench/replay setups only.
         Node(
             package='tf2_ros',
             executable='static_transform_publisher',
             name='gnss_antenna_tf',
-            arguments=['0', '0', '0.9', '0', '0', '0',
+            arguments=['0.020', '0', '0.795', '0', '0', '0',
                        'base_link', 'gnss_antenna'],
+            condition=IfCondition(LaunchConfiguration('publish_antenna_tf')),
         ),
 
         # Hunter wheel speed -> Odometry twist
