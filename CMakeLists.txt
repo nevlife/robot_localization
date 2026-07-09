@@ -353,6 +353,7 @@ install(DIRECTORY
 
 install(PROGRAMS
   scripts/gps_manager.py
+  scripts/wheel_odom_adapter.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
