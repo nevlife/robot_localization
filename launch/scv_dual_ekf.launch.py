@@ -45,6 +45,12 @@ def generate_launch_description():
             description='Start FAST-LIO here (false when it runs elsewhere '
                         'or when replaying a bag that already contains '
                         '/odometry/fast_lio)'),
+        DeclareLaunchArgument(
+            'gate_max_radius_m', default_value='5000.0',
+            description='GNSS sanity gate radius around the map datum; fixes '
+                        'farther than this are dropped before navsat (blocks '
+                        'receiver cold-start garbage). Raise to effectively '
+                        'disable for A/B testing.'),
 
         # LiDAR-inertial odometry (primary precision source)
         IncludeLaunchDescription(
@@ -109,6 +115,27 @@ def generate_launch_description():
             remappings=[('odometry/filtered', 'odometry/global')],
         ),
 
+        # GNSS sanity gate: drops cold-start garbage (e.g. a fix 110 km out
+        # right after receiver power-up) BEFORE it can kick the map EKF,
+        # which deliberately has no rejection threshold. Datum must match
+        # navsat's datum in scv_dual_ekf.yaml.
+        Node(
+            package='robot_localization',
+            executable='gps_fix_gate.py',
+            name='gps_fix_gate',
+            output='screen',
+            respawn=True,
+            respawn_delay=1.0,
+            parameters=[{
+                'use_sim_time': use_sim_time,
+                'input_topic': '/ublox_gps_node/fix',
+                'output_topic': '/gps/fix_gated',
+                'datum_lat': 35.91361,
+                'datum_lon': 128.80308,
+                'max_radius_m': LaunchConfiguration('gate_max_radius_m'),
+            }],
+        ),
+
         # GPS -> map-frame odometry (datum = graph-map node[0])
         Node(
             package='robot_localization',
@@ -119,7 +146,7 @@ def generate_launch_description():
             respawn_delay=1.0,
             parameters=[params_file, {'use_sim_time': use_sim_time}],
             remappings=[
-                ('gps/fix', '/ublox_gps_node/fix'),
+                ('gps/fix', '/gps/fix_gated'),
                 ('imu', '/vectornav/imu'),
                 ('odometry/filtered', 'odometry/global'),
             ],
