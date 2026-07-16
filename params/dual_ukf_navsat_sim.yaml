@@ -1,0 +1,223 @@
+# Dual-UKF + navsat for the Hunter 2 (AgileX Ackermann) Gazebo sim.
+#
+# Local (odom) UKF  : wheel odom + IMU        -> publishes odom -> base_link
+# Global (map) UKF  : wheel odom + IMU + GPS  -> publishes map  -> base_link (map -> odom TF)
+# navsat_transform  : gps/fix + imu + global-UKF odom -> odometry/gps (map-frame GPS position)
+#
+# KISS-ICP is dropped: local odometry is wheel (forward speed) + IMU (heading) only,
+# smooth and drift-only -- all local navigation needs. Lidar ICP is reserved for real
+# bags / the real robot, not this sim.
+#
+# Ackermann (Hunter 2): nonholonomic, cannot rotate in place, so no lateral velocity
+# (vy) is fused. Heading comes from the IMU; the wheel odom contributes forward speed
+# (vx) plus its steering-derived yaw rate. There is no Ackermann model in
+# robot_localization -- the nonholonomic constraint lives in the wheel odom source.
+#
+# Live topics/frames (gz sim, verified with ros2 topic echo):
+#   /odometry/wheel  nav_msgs/Odometry   odom -> base_link, pose(x,y,yaw)+twist(vx,vyaw)
+#   /imu             sensor_msgs/Imu     orientation + gyro + accel
+#   /gps/fix         sensor_msgs/NavSatFix   valid fix
+#   base frame = base_link (tree: base_link -> chassis -> {imu_link, gps_link, ...})
+#
+# TWO SIM ISSUES this yaml assumes are fixed upstream (see notes at the bottom):
+#   1. /imu frame_id is "hunter2/base_link/imu_sensor", which is NOT in TF -> r_l drops
+#      every IMU msg until that frame resolves (bridge fix or a static transform).
+#   2. /odometry/wheel covariance is all zeros -> r_l treats it as perfect truth. The
+#      sim odom publisher should emit realistic covariances.
+#
+# Frame ownership (only one publisher per TF edge):
+#   robot_state_publisher : base_link -> chassis -> {imu_link, gps_link, wheels}  (static/joints)
+#   ukf_filter_node_odom  : odom -> base_link
+#   ukf_filter_node_map   : map  -> odom
+#   sim wheel odom        : topic only (no TF), so odom -> base_link is free for the UKF
+
+ukf_filter_node_odom:
+  ros__parameters:
+    frequency: 30.0
+    sensor_timeout: 0.1
+    two_d_mode: true
+    transform_time_offset: 0.0
+    transform_timeout: 0.0
+    print_diagnostics: true
+    debug: false
+
+    # UKF sigma-point params (robot_localization defaults)
+    alpha: 0.001
+    kappa: 0.0
+    beta: 2.0
+
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_link
+    world_frame: odom
+
+    # Ackermann wheel odometry: forward speed (vx) + steering-derived yaw rate (vyaw).
+    # Velocities only (not pose), so this dead-reckons and cannot inject the source's
+    # zero-covariance absolute pose as truth. Heading is anchored by the IMU below.
+    odom0: /odometry/wheel
+    odom0_config: [false, false, false,
+                  false, false, false,
+                  true,  false, false,
+                  false, false, true,
+                  false, false, false]
+    odom0_queue_size: 10
+    odom0_nodelay: true
+    odom0_differential: false
+    odom0_relative: false
+
+    # IMU: absolute yaw (gz IMU orientation is world-ENU referenced -> driftless heading
+    # in sim) + yaw rate. Linear acceleration is not fused (noisy, double-integration
+    # drifts). Requires the IMU frame_id to resolve in TF (see header issue 1).
+    imu0: /imu
+    imu0_config: [false, false, false,
+                  false, false, true,
+                  false, false, false,
+                  false, false, true,
+                  false, false, false]
+    imu0_nodelay: false
+    imu0_differential: false
+    imu0_relative: false
+    imu0_queue_size: 10
+    imu0_remove_gravitational_acceleration: true
+
+    use_control: false
+
+    process_noise_covariance: [1e-3, 0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                              0.0,    1e-3,  0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                              0.0,    0.0,    1e-3,  0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                              0.0,    0.0,    0.0,    0.3,   0.0,    0.0,     0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                              0.0,    0.0,    0.0,    0.0,    0.3,   0.0,    0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                              0.0,    0.0,    0.0,    0.0,    0.0,    0.01,  0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                              0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.5,    0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                              0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.5,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                              0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.1,   0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                              0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.3,   0.0,    0.0,    0.0,    0.0,    0.0,
+                              0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.0,    0.3,   0.0,    0.0,    0.0,    0.0,
+                              0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.0,    0.0,    0.3,   0.0,    0.0,    0.0,
+                              0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.3,   0.0,    0.0,
+                              0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.3,   0.0,
+                              0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.3]
+
+    initial_estimate_covariance: [1e-9, 0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,     0.0,    0.0,    0.0,
+                                  0.0,    1e-9, 0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,     0.0,    0.0,    0.0,
+                                  0.0,    0.0,    1e-9, 0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,     0.0,    0.0,    0.0,
+                                  0.0,    0.0,    0.0,    1.0,  0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,     0.0,    0.0,    0.0,
+                                  0.0,    0.0,    0.0,    0.0,    1.0,  0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,     0.0,    0.0,    0.0,
+                                  0.0,    0.0,    0.0,    0.0,    0.0,    1e-9, 0.0,    0.0,    0.0,    0.0,     0.0,     0.0,     0.0,    0.0,    0.0,
+                                  0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    1.0,  0.0,    0.0,    0.0,     0.0,     0.0,     0.0,    0.0,    0.0,
+                                  0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    1.0,  0.0,    0.0,     0.0,     0.0,     0.0,    0.0,    0.0,
+                                  0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    1.0,  0.0,      0.0,     0.0,     0.0,    0.0,    0.0,
+                                  0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    1.0,    0.0,     0.0,     0.0,    0.0,    0.0,
+                                  0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     1.0,    0.0,     0.0,    0.0,    0.0,
+                                  0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     1.0,    0.0,    0.0,    0.0,
+                                  0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,     1.0,   0.0,    0.0,
+                                  0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,     0.0,    1.0,  0.0,
+                                  0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,     0.0,    0.0,    1.0]
+
+ukf_filter_node_map:
+  ros__parameters:
+    frequency: 30.0
+    sensor_timeout: 0.1
+    two_d_mode: true
+    transform_time_offset: 0.0
+    transform_timeout: 0.0
+    print_diagnostics: true
+    debug: false
+
+    # UKF sigma-point params (robot_localization defaults)
+    alpha: 0.001
+    kappa: 0.0
+    beta: 2.0
+
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_link
+    world_frame: map
+
+    # Wheel odom as differential (r_l differentiates the pose into a velocity) so it
+    # does not fight the absolute GPS position that anchors the map frame. Only x/y
+    # (planar dead-reckoning between GPS fixes); heading is the IMU's job.
+    odom0: /odometry/wheel
+    odom0_config: [true,  true,  false,
+                  false, false, false,
+                  false, false, false,
+                  false, false, false,
+                  false, false, false]
+    odom0_queue_size: 10
+    odom0_nodelay: true
+    odom0_differential: true
+    odom0_relative: false
+
+    # GPS position from navsat_transform (map frame): absolute x/y.
+    odom1: odometry/gps
+    odom1_config: [true,  true,  false,
+                  false, false, false,
+                  false, false, false,
+                  false, false, false,
+                  false, false, false]
+    odom1_queue_size: 10
+    odom1_nodelay: true
+    odom1_differential: false
+    odom1_relative: false
+
+    # IMU: absolute yaw (anchors the map heading; GPS gives position, not heading) +
+    # yaw rate. 2D mode zeroes roll/pitch, so only yaw/vyaw matter. No linear accel.
+    imu0: /imu
+    imu0_config: [false, false, false,
+                  false, false, true,
+                  false, false, false,
+                  false, false, true,
+                  false, false, false]
+    imu0_nodelay: true
+    imu0_differential: false
+    imu0_relative: false
+    imu0_queue_size: 10
+    imu0_remove_gravitational_acceleration: true
+
+    use_control: false
+
+    process_noise_covariance: [1.0,   0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                              0.0,    1.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                              0.0,    0.0,    1e-3,   0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                              0.0,    0.0,    0.0,    0.3,    0.0,    0.0,    0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                              0.0,    0.0,    0.0,    0.0,    0.3,    0.0,    0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                              0.0,    0.0,    0.0,    0.0,    0.0,    0.01,   0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                              0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.5,     0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                              0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.5,     0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                              0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.1,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                              0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.3,    0.0,    0.0,    0.0,    0.0,    0.0,
+                              0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.0,    0.3,    0.0,    0.0,    0.0,    0.0,
+                              0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.0,    0.0,    0.3,    0.0,    0.0,    0.0,
+                              0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.3,    0.0,    0.0,
+                              0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.3,    0.0,
+                              0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.3]
+
+    initial_estimate_covariance: [1.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,     0.0,    0.0,    0.0,
+                                  0.0,    1.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,     0.0,    0.0,    0.0,
+                                  0.0,    0.0,    1e-9,   0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,     0.0,    0.0,    0.0,
+                                  0.0,    0.0,    0.0,    1.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,     0.0,    0.0,    0.0,
+                                  0.0,    0.0,    0.0,    0.0,    1.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,     0.0,    0.0,    0.0,
+                                  0.0,    0.0,    0.0,    0.0,    0.0,    1e-9,   0.0,    0.0,    0.0,    0.0,     0.0,     0.0,     0.0,    0.0,    0.0,
+                                  0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    1.0,    0.0,    0.0,    0.0,     0.0,     0.0,     0.0,    0.0,    0.0,
+                                  0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    1.0,    0.0,    0.0,     0.0,     0.0,     0.0,    0.0,    0.0,
+                                  0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    1.0,    0.0,     0.0,     0.0,     0.0,    0.0,    0.0,
+                                  0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    1.0,     0.0,     0.0,     0.0,    0.0,    0.0,
+                                  0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     1.0,     0.0,     0.0,    0.0,    0.0,
+                                  0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     1.0,     0.0,    0.0,    0.0,
+                                  0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,     1.0,    0.0,    0.0,
+                                  0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,     0.0,    1.0,    0.0,
+                                  0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,     0.0,    0.0,    1.0]
+
+navsat_transform:
+  ros__parameters:
+    frequency: 30.0
+    delay: 3.0
+    # Sim: Webots inertial_unit reports absolute yaw in the world frame, so no real
+    # magnetic declination. Adjust once GPS is active if the map heading is rotated.
+    magnetic_declination_radians: 0.0
+    yaw_offset: 0.0
+    zero_altitude: false
+    broadcast_cartesian_transform: false
+    publish_filtered_gps: true
+    use_odometry_yaw: false
+    wait_for_datum: false

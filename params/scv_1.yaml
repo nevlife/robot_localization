@@ -9,6 +9,11 @@
 # yaw rate for rotational smoothing. Linear acceleration is not fused (Webots accel
 # double-integrated is unstable).
 #
+# NOTE: two_d_mode stays TRUE here. Fusing absolute pitch into this planar Ackermann
+# filter makes forward velocity leak into z (vz = vx*sin(pitch)), so any pitch bias
+# ramps odom.z upward. Terrain leveling is done in the traversability node instead
+# (it re-levels each scan with the IMU gravity vector), which needs no z state.
+#
 # Ackermann / 2D: two_d_mode zeroes z, roll, pitch and their rates; the platform is
 # nonholonomic so no lateral velocity (vy) is fused. The nonholonomic constraint lives
 # in the odometry source, not the filter (robot_localization has no Ackermann model).
