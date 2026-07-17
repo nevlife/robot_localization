@@ -1,29 +1,3 @@
-# Single UKF local odometry for the Webots scout sim (Ackermann, 2D).
-#
-# Fuses KISS-ICP lidar odometry + IMU into a smooth odom -> base_footprint pose.
-#   - KISS-ICP (kiss/odometry) : absolute planar pose anchor (x, y, yaw) + forward vel.
-#   - IMU (imu)                : yaw rate only.
-#
-# No magnetometer: absolute heading comes from KISS-ICP, NOT the IMU, so no absolute
-# IMU orientation is fused (imu yaw/roll/pitch are left false). IMU contributes the
-# yaw rate for rotational smoothing. Linear acceleration is not fused (Webots accel
-# double-integrated is unstable).
-#
-# NOTE: two_d_mode stays TRUE here. Fusing absolute pitch into this planar Ackermann
-# filter makes forward velocity leak into z (vz = vx*sin(pitch)), so any pitch bias
-# ramps odom.z upward. Terrain leveling is done in the traversability node instead
-# (it re-levels each scan with the IMU gravity vector), which needs no z state.
-#
-# Ackermann / 2D: two_d_mode zeroes z, roll, pitch and their rates; the platform is
-# nonholonomic so no lateral velocity (vy) is fused. The nonholonomic constraint lives
-# in the odometry source, not the filter (robot_localization has no Ackermann model).
-#
-# Launch as:
-#   ros2 run robot_localization ukf_node --ros-args -r __node:=ukf_filter_node_odom \
-#       --params-file scv_1.yaml
-# (publish_tf true -> owns the odom -> base_footprint TF; run KISS-ICP with
-#  publish_odom_tf:=false so there is a single publisher of that edge.)
-
 ukf_filter_node_odom:
   ros__parameters:
     frequency: 30.0
@@ -39,7 +13,7 @@ ukf_filter_node_odom:
 
     map_frame: map
     odom_frame: odom
-    base_link_frame: base_footprint
+    base_link_frame: base_link
     world_frame: odom
 
     # KISS-ICP lidar odometry: absolute planar pose (x, y, yaw) + forward velocity (vx).
@@ -55,7 +29,7 @@ ukf_filter_node_odom:
     odom0_relative: false
 
     # IMU: yaw rate only (no absolute orientation -> no magnetometer; heading is KISS).
-    imu0: imu
+    imu0: vectornav/imu
     imu0_config: [false, false, false,
                   false, false, false,
                   false, false, false,

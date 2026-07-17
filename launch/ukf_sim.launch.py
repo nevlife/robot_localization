@@ -24,12 +24,19 @@ import launch.actions
 from launch.actions import DeclareLaunchArgument
 
 def generate_launch_description():
+    params = os.path.join(
+        get_package_share_directory("robot_localization"),
+        "params",
+        "scv_1.yaml",
+    )
+    use_sim_time = {"use_sim_time": True}
+
     return LaunchDescription([
         launch_ros.actions.Node(
             package='robot_localization',
             executable='ukf_node',
-            name='ukf_filter_node',
+            name='ukf_filter_node_odom',
             output='screen',
-            parameters=[os.path.join(get_package_share_directory("robot_localization"), 'params', 'scv_1.yaml')],
+            parameters=[params, use_sim_time],
            ),
 ])
