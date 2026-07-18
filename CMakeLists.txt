@@ -358,6 +358,7 @@ install(DIRECTORY
 
 install(PROGRAMS
   scripts/gps_manager.py
+  scripts/current_speed_to_twist.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
