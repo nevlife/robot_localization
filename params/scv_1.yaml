@@ -1,8 +1,25 @@
+# scv_1.yaml - wheel + IMU local UKF (6DOF, no magnetometer), best-tuned.
+#
+# CHANGED from the old KISS+IMU fusion to wheel+IMU (no lidar). Fuses forward
+# velocity (vx) + a nonholonomic lateral constraint (vy=0) from the wheel, yaw
+# rate from the IMU, and absolute roll/pitch from the IMU (gravity-referenced,
+# driftless - no magnetometer). two_d_mode is off so roll/pitch/z are estimated;
+# on flat ground roll/pitch stay ~0, on slopes they track the real tilt (useful
+# for terrain / FastDEM). Requires a static TF vectornav -> base_link so the IMU
+# orientation can be rotated into base_link. z drifts slowly (no absolute z source).
+#
+# IMPORTANT - the best-tuned wheel parameters live in the current_speed_to_twist /
+# scaled_nhc_twist NODE, not in this file (they set the twist value + covariance):
+#     wheel_scale = 0.925   (SCV_2 grid best; real-config 0.90 - calibrate per robot)
+#     vx_var      = 0.05    (forward-speed measurement variance)
+#     nhc_var     = 0.001   (lateral pseudo-measurement variance; small = strong NHC)
+# Run it as:  scaled_nhc_twist.py -p wheel_scale:=0.925 -p vx_var:=0.05 -p nhc_var:=0.001
+# publishing /wheel/twist_nhc. Do NOT run KISS-ICP; this config does not use it.
 ukf_filter_node_odom:
   ros__parameters:
     frequency: 30.0
     sensor_timeout: 0.1
-    two_d_mode: true
+    two_d_mode: false            # 6DOF: estimate roll, pitch, z (roll/pitch from IMU gravity)
     transform_time_offset: 0.0
     transform_timeout: 0.0
     print_diagnostics: true
@@ -16,24 +33,25 @@ ukf_filter_node_odom:
     base_link_frame: base_link
     world_frame: odom
 
-    # KISS-ICP lidar odometry: absolute planar pose (x, y, yaw) + forward velocity (vx).
-    odom0: kiss/odometry
-    odom0_config: [true,  true,  false,
-                  false, false, true,
-                  true,  false, false,
-                  false, false, false,
-                  false, false, false]
-    odom0_queue_size: 10
-    odom0_nodelay: true
-    odom0_differential: false
-    odom0_relative: false
+    # Wheel: forward velocity (vx) + nonholonomic lateral constraint (vy = 0).
+    # Both value and covariance come from scaled_nhc_twist (wheel_scale, vx_var, nhc_var).
+    twist0: /wheel/twist_nhc
+    twist0_config: [false, false, false,
+                    false, false, false,
+                    true,  true,  false,
+                    false, false, false,
+                    false, false, false]
+    twist0_queue_size: 10
+    twist0_nodelay: true
 
-    # IMU: yaw rate only (no absolute orientation -> no magnetometer; heading is KISS).
-    imu0: vectornav/imu
+    # IMU: absolute roll/pitch (gravity-referenced, driftless, no magnetometer) +
+    # angular rates. Absolute yaw stays OFF (that would be the magnetometer); heading
+    # comes from integrating yaw rate.
+    imu0: /vectornav/imu
     imu0_config: [false, false, false,
+                  true,  true,  false,
                   false, false, false,
-                  false, false, false,
-                  false, false, true,
+                  true,  true,  true,
                   false, false, false]
     imu0_nodelay: false
     imu0_differential: false
