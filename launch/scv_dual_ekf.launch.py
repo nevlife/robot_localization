@@ -103,16 +103,20 @@ def generate_launch_description():
             remappings=[('odometry/filtered', '/odom')],
         ),
 
-        # Global EKF: map frame (GPS-anchored), owns map->odom TF
+        # Map anchoring: owns map->odom TF + /odometry/global.
+        # NOT an EKF: the map EKF diverged km-scale on the 2026-07-18 field
+        # run (out-of-order navsat stamps vs 100 Hz IMU excited its
+        # unobserved velocity/acceleration states — see map_anchor_node.py).
+        # A complementary filter estimates exactly what anchoring needs (a
+        # slowly-varying rigid map->odom transform) and nothing else.
         Node(
             package='robot_localization',
-            executable='ekf_node',
-            name='ekf_filter_node_map',
+            executable='map_anchor_node.py',
+            name='map_anchor',
             output='screen',
             respawn=True,
             respawn_delay=1.0,
-            parameters=[params_file, {'use_sim_time': use_sim_time}],
-            remappings=[('odometry/filtered', 'odometry/global')],
+            parameters=[{'use_sim_time': use_sim_time}],
         ),
 
         # GNSS sanity gate: drops cold-start garbage (e.g. a fix 110 km out

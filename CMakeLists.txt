@@ -354,6 +354,7 @@ install(DIRECTORY
 install(PROGRAMS
   scripts/gps_manager.py
   scripts/gps_fix_gate.py
+  scripts/map_anchor_node.py
   scripts/wheel_odom_adapter.py
   DESTINATION lib/${PROJECT_NAME}
 )
