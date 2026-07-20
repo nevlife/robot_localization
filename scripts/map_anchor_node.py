@@ -54,6 +54,11 @@ class MapAnchorNode(Node):
         # EMA time constants (s); gains derived per-sample from actual dt
         self.declare_parameter('xy_tau', 2.0)
         self.declare_parameter('yaw_tau', 5.0)
+        # innovation slew limit [m] per GPS sample: multipath bias JUMPS (real
+        # receivers under-report covariance while multipathing) drag a plain
+        # EMA by metres; a rate limit turns them into bounded creep while
+        # still converging metre-scale legitimate offsets within ~1 s @10 Hz
+        self.declare_parameter('max_step_m', 0.5)
         # magnetic/mounting declination: map yaw = imu yaw + offset (rad)
         self.declare_parameter('yaw_offset', 0.0)
         self.declare_parameter('gps_topic', 'odometry/gps')
@@ -62,6 +67,7 @@ class MapAnchorNode(Node):
 
         self.xy_tau = self.get_parameter('xy_tau').value
         self.yaw_tau = self.get_parameter('yaw_tau').value
+        self.max_step = self.get_parameter('max_step_m').value
         self.yaw_offset = self.get_parameter('yaw_offset').value
 
         self.odom = None            # (x, y, yaw) in odom frame
@@ -129,8 +135,15 @@ class MapAnchorNode(Node):
                 f'map frame anchored: t=({tx:.2f}, {ty:.2f}) th={math.degrees(self.th):.1f} deg')
         else:
             g = min(1.0, dt / self.xy_tau)
-            self.t[0] += g * (tx - self.t[0])
-            self.t[1] += g * (ty - self.t[1])
+            dx = g * (tx - self.t[0])
+            dy = g * (ty - self.t[1])
+            step = math.hypot(dx, dy)
+            if step > self.max_step:
+                scale = self.max_step / step
+                dx *= scale
+                dy *= scale
+            self.t[0] += dx
+            self.t[1] += dy
 
     def publish(self, stamp):
         tfm = TransformStamped()
