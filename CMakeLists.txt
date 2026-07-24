@@ -359,6 +359,8 @@ install(DIRECTORY
 install(PROGRAMS
   scripts/gps_manager.py
   scripts/current_speed_to_twist.py
+  scripts/scaled_nhc_twist.py
+  scripts/gps_quality_gate.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

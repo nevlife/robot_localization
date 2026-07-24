@@ -5,3 +5,7 @@ doc/html
 *.cproject
 *.project
 *.settings
+
+# Python cache
+__pycache__/
+*.py[cod]

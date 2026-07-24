@@ -1,0 +1,21 @@
+# scv_navsat.yaml - navsat_transform for single GPS, no magnetometer, gated fusion.
+#
+# Consumes the GATED fix (/gps/fix_gated) and the gated course heading (/gps/heading, fed
+# as the "imu"), and the global filter odometry (/odometry/filtered_map). Produces
+# /odometry/gps (GPS position in the map frame) for the global UKF to fuse.
+#
+# use_odometry_yaw is false: heading comes from the gated /gps/heading, not from the filter
+# yaw (which is gyro-relative until a good-GPS segment anchors it). The datum therefore
+# initializes only once a good-GPS moving segment provides a heading - inherent to no-mag
+# single-GPS setups.
+navsat_transform_node:
+  ros__parameters:
+    frequency: 30.0
+    delay: 3.0
+    magnetic_declination_radians: 0.0   # heading source is GPS course (geographic), not a magnetometer
+    yaw_offset: 0.0                      # /gps/heading is already ENU (0 = East)
+    zero_altitude: false
+    broadcast_utm_transform: false
+    publish_filtered_gps: true
+    use_odometry_yaw: false              # heading from gated /gps/heading (remapped to imu)
+    wait_for_datum: false                # auto-init origin from the first gated fix + heading
