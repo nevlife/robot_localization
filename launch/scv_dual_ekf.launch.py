@@ -17,7 +17,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 
@@ -45,6 +45,13 @@ def generate_launch_description():
             description='Start FAST-LIO here (false when it runs elsewhere '
                         'or when replaying a bag that already contains '
                         '/odometry/fast_lio)'),
+        DeclareLaunchArgument(
+            'map_anchor_pcd', default_value='0',
+            description='1/true: hybrid anchoring — consume /pcd/global_pose '
+                        '(main-line PCD map matcher, run unmodified alongside) '
+                        'as the anchor source while GPS is degraded (no RTK). '
+                        'Requires the SCV_NEW_MAP0721-family map whose georef '
+                        'offset matches map_anchor pcd_offset_e/n.'),
         DeclareLaunchArgument(
             'gate_max_radius_m', default_value='5000.0',
             description='GNSS sanity gate radius around the map datum; fixes '
@@ -116,7 +123,13 @@ def generate_launch_description():
             output='screen',
             respawn=True,
             respawn_delay=1.0,
-            parameters=[{'use_sim_time': use_sim_time}],
+            parameters=[{
+                'use_sim_time': use_sim_time,
+                'pcd_pose_topic': PythonExpression(
+                    ["'/pcd/global_pose' if '",
+                     LaunchConfiguration('map_anchor_pcd'),
+                     "' in ('1', 'true', 'True') else ''"]),
+            }],
         ),
 
         # GNSS sanity gate: drops cold-start garbage (e.g. a fix 110 km out
