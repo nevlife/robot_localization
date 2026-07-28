@@ -34,7 +34,8 @@ import math
 import rclpy
 from rclpy.node import Node
 from nav_msgs.msg import Odometry
-from sensor_msgs.msg import Imu
+from sensor_msgs.msg import Imu, NavSatFix
+from std_msgs.msg import String
 from geometry_msgs.msg import TransformStamped
 from tf2_ros import TransformBroadcaster
 
@@ -46,6 +47,24 @@ def yaw_of(q):
 
 def wrap(a):
     return math.atan2(math.sin(a), math.cos(a))
+
+
+def anchor_target(gx, gy, ox, oy, th):
+    """map->odom translation implied by one absolute observation (gx, gy)
+    of the robot whose odom-frame position is (ox, oy), given yaw th."""
+    c, s = math.cos(th), math.sin(th)
+    return gx - (c * ox - s * oy), gy - (s * ox + c * oy)
+
+
+def select_source(rtk_recent, pcd_fresh, pcd_ever):
+    """Anchor-source policy (pure, unit-tested):
+    RTK sample > (PCD fresh ? PCD : PCD_HOLD, once PCD ever seen) > plain GPS.
+    Returns one of 'GPS_RTK', 'PCD', 'PCD_HOLD', 'GPS'."""
+    if rtk_recent:
+        return 'GPS_RTK'
+    if pcd_ever:
+        return 'PCD' if pcd_fresh else 'PCD_HOLD'
+    return 'GPS'
 
 
 class MapAnchorNode(Node):
@@ -73,13 +92,6 @@ class MapAnchorNode(Node):
         self.declare_parameter('pcd_timeout', 3.0)         # [s] freshness —
                                                            # rides matcher
                                                            # MayLost cycles
-        # GPS wins back the anchor only on SUSTAINED RTK: sporadic status-2
-        # blips (7.7% of fixes on bag 82) otherwise yank the anchor back to
-        # the plain-fix-biased EMA and forfeit the PCD accuracy (measured:
-        # blip-priority scored 1.23 m vs main's PCD-held 0.21 m). Mirrors
-        # main's PCD_ACTIVE -> GPS_RECOVERY semantics.
-        self.declare_parameter('rtk_sustain', 3.0)         # [s] continuous RTK
-        self.declare_parameter('rtk_gap_max', 1.0)         # [s] streak breaker
         # magnetic/mounting declination: map yaw = imu yaw + offset (rad)
         self.declare_parameter('yaw_offset', 0.0)
         self.declare_parameter('gps_topic', 'odometry/gps')
@@ -93,10 +105,7 @@ class MapAnchorNode(Node):
         self.pcd_off = (self.get_parameter('pcd_offset_e').value,
                         self.get_parameter('pcd_offset_n').value)
         self.pcd_timeout = self.get_parameter('pcd_timeout').value
-        self.rtk_sustain = self.get_parameter('rtk_sustain').value
-        self.rtk_gap_max = self.get_parameter('rtk_gap_max').value
         self.last_rtk_t = None
-        self.rtk_streak_t0 = None
         self.last_pcd = None        # (t, x_our, y_our, yaw)
         self.mode = 'INIT'
         self.yaw_offset = self.get_parameter('yaw_offset').value
@@ -117,8 +126,6 @@ class MapAnchorNode(Node):
             Imu, self.get_parameter('imu_topic').value, self.on_imu, 50)
         self.create_subscription(
             Odometry, self.get_parameter('gps_topic').value, self.on_gps, 30)
-        from sensor_msgs.msg import NavSatFix
-        from std_msgs.msg import String
         # RTK detection from the gated fix stream (sane fixes only)
         self.create_subscription(NavSatFix, '/gps/fix_gated', self.on_fix, 30)
         self.pub_mode = self.create_publisher(String, 'map_anchor/mode', 10)
@@ -132,18 +139,15 @@ class MapAnchorNode(Node):
         return self.get_clock().now().nanoseconds / 1e9
 
     def set_mode(self, mode):
-        if mode != self.mode:
-            self.mode = mode
-            self.get_logger().info(f'anchor source -> {mode}')
-        from std_msgs.msg import String
+        if mode == self.mode:
+            return
+        self.mode = mode
+        self.get_logger().info(f'anchor source -> {mode}')
         self.pub_mode.publish(String(data=mode))
 
     def on_fix(self, m):
         if m.status.status == 2:
-            t = self.now_s()
-            if self.last_rtk_t is None or t - self.last_rtk_t > self.rtk_gap_max:
-                self.rtk_streak_t0 = t          # streak (re)start
-            self.last_rtk_t = t
+            self.last_rtk_t = self.now_s()
 
     def rtk_recent(self, window=0.3):
         return self.last_rtk_t is not None and \
@@ -151,22 +155,13 @@ class MapAnchorNode(Node):
 
     def snap_anchor(self, gx, gy, g=0.5):
         ox, oy, _ = self.odom
-        c, s_ = math.cos(self.th), math.sin(self.th)
-        tx = gx - (c * ox - s_ * oy)
-        ty = gy - (s_ * ox + c * oy)
+        tx, ty = anchor_target(gx, gy, ox, oy, self.th)
         if not self.anchored:
             self.t = [tx, ty]
             self.anchored = True
         else:
             self.t[0] += g * (tx - self.t[0])
             self.t[1] += g * (ty - self.t[1])
-
-    def rtk_active(self):
-        if self.last_rtk_t is None or self.rtk_streak_t0 is None:
-            return False
-        t = self.now_s()
-        return (t - self.last_rtk_t < self.rtk_gap_max and
-                self.last_rtk_t - self.rtk_streak_t0 >= self.rtk_sustain)
 
     def pcd_fresh(self):
         return self.last_pcd is not None and \
@@ -188,17 +183,7 @@ class MapAnchorNode(Node):
         if self.odom is None or not self.th_init or self.rtk_recent():
             return
         self.set_mode('PCD')
-        ox, oy, _ = self.odom
-        c, s_ = math.cos(self.th), math.sin(self.th)
-        tx = self.last_pcd[1] - (c * ox - s_ * oy)
-        ty = self.last_pcd[2] - (s_ * ox + c * oy)
-        if not self.anchored:
-            self.t = [tx, ty]
-            self.anchored = True
-        else:
-            g = 0.5                       # fast convergence, 2 corrections
-            self.t[0] += g * (tx - self.t[0])
-            self.t[1] += g * (ty - self.t[1])
+        self.snap_anchor(self.last_pcd[1], self.last_pcd[2], g=0.5)
 
     def on_imu(self, m):
         self.imu_yaw = wrap(yaw_of(m.orientation) + self.yaw_offset)
@@ -235,32 +220,26 @@ class MapAnchorNode(Node):
         # noisier source cannot fight the better one (mirrors main's
         # GPS_ACTIVE -> PCD_ACTIVE handover)
         gx, gy = m.pose.pose.position.x, m.pose.pose.position.y
-        # RTK-fixed sample (cm-class): snap the anchor onto it directly —
-        # smoothing across surrounding plain-fix bias costs ~1 m at exactly
-        # the moments GPS is at its best (measured: EMA-only anchored 1.23 m
-        # vs main's fix-following 0.21 m at RTK moments)
-        if self.rtk_recent():
-            if self.pcd_topic:
-                self.set_mode('GPS_RTK')
+        src = select_source(self.rtk_recent(),
+                            self.pcd_fresh(),
+                            self.pcd_topic and self.last_pcd is not None)
+        self.set_mode(src)
+        if src == 'GPS_RTK':
+            # RTK-fixed sample (cm-class): snap directly — smoothing across
+            # surrounding plain-fix bias costs ~1 m at exactly the moments
+            # GPS is at its best (measured 1.23 m EMA vs 0.14 m snapped)
             self.snap_anchor(gx, gy, g=0.5)
-            return
-        if self.pcd_topic and self.last_pcd is not None:
-            # PCD has taken over at least once: HOLD between corrections
-            # (plain fixes carry the multipath bias we switched away from)
-            self.set_mode('PCD_HOLD' if not self.pcd_fresh() else 'PCD')
-            return
-        if self.pcd_topic:
-            self.set_mode('GPS')
-        self.update_anchor(gx, gy)
+        elif src == 'GPS':
+            self.update_anchor(gx, gy)
+        # PCD / PCD_HOLD: the matcher owns the anchor — plain fixes must not
+        # re-drag it between sparse corrections
 
     def update_anchor(self, gx, gy):
         now = self.now_s()
         dt = 0.1 if self.last_gps_t is None else max(1e-3, now - self.last_gps_t)
         self.last_gps_t = now
         ox, oy, _ = self.odom
-        c, s = math.cos(self.th), math.sin(self.th)
-        tx = gx - (c * ox - s * oy)
-        ty = gy - (s * ox + c * oy)
+        tx, ty = anchor_target(gx, gy, ox, oy, self.th)
         if not self.anchored:
             self.t = [tx, ty]       # snap over the provisional bootstrap value
             self.anchored = True
