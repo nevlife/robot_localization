@@ -160,8 +160,20 @@ class MapAnchorNode(Node):
             self.t = [tx, ty]
             self.anchored = True
         else:
-            self.t[0] += g * (tx - self.t[0])
-            self.t[1] += g * (ty - self.t[1])
+            dx = g * (tx - self.t[0])
+            dy = g * (ty - self.t[1])
+            # slew-limit snaps too: alternating RTK<->plain observations
+            # differ by the plain-fix bias (~1 m) — unlimited snapping made
+            # the anchor JUMP at every mode boundary (29 jumps >1 m on bag
+            # 150709 vs main's 0). 2x the EMA slew still converges an RTK
+            # correction in 2-3 samples.
+            step = math.hypot(dx, dy)
+            lim = 2.0 * self.max_step
+            if step > lim:
+                dx *= lim / step
+                dy *= lim / step
+            self.t[0] += dx
+            self.t[1] += dy
 
     def pcd_fresh(self):
         return self.last_pcd is not None and \
