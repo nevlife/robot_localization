@@ -67,6 +67,26 @@ def select_source(rtk_recent, pcd_fresh, pcd_ever):
     return 'GPS'
 
 
+def gate_rtk(resid_m, streak, gap_s, thresh_m, need, reset_gap_s=5.0):
+    """RTK re-trust gate (pure, unit-tested).
+
+    A receiver's own quality flags must not restore snap authority: real
+    receivers report status 2 / tiny covariance while multipathing metres
+    off (cov 0.14 at 110 km error on the 2026-07-14 cold start; field
+    report 2026-07-30: false "recovered" GPS re-dragged the anchor away
+    from the SLAM-consistent pose and warped the graph map). An RTK sample
+    regains authority only by CONSISTENCY with the current estimate:
+    `need` consecutive samples whose anchor innovation is <= thresh_m,
+    with no inter-sample gap longer than reset_gap_s. A single outlier
+    revokes trust instantly — asymmetric hysteresis (fast to revoke, slow
+    to grant). Returns (trusted, new_streak)."""
+    if gap_s > reset_gap_s or resid_m > thresh_m:
+        streak = 0
+    if resid_m <= thresh_m:
+        streak += 1
+    return streak >= need, streak
+
+
 class MapAnchorNode(Node):
     def __init__(self):
         super().__init__('map_anchor')
@@ -92,6 +112,15 @@ class MapAnchorNode(Node):
         self.declare_parameter('pcd_timeout', 3.0)         # [s] freshness —
                                                            # rides matcher
                                                            # MayLost cycles
+        # ---- RTK re-trust (innovation) gate ------------------------------
+        # thresh aligned with the chamber's GPS_DIVERGE_M; <=0 disables the
+        # gate (pre-2026-07-30 behaviour) for A/B and field rollback. NB a
+        # false fix whose bias stays UNDER the threshold is indistinguishable
+        # from odom drift by consistency alone — that residual systematic
+        # component is the online frame-calibration work item, not the gate's.
+        self.declare_parameter('rtk_gate_m', 3.0)
+        self.declare_parameter('rtk_gate_n', 5)
+        self.declare_parameter('rtk_gate_reset_s', 5.0)
         # magnetic/mounting declination: map yaw = imu yaw + offset (rad)
         self.declare_parameter('yaw_offset', 0.0)
         self.declare_parameter('gps_topic', 'odometry/gps')
@@ -105,6 +134,12 @@ class MapAnchorNode(Node):
         self.pcd_off = (self.get_parameter('pcd_offset_e').value,
                         self.get_parameter('pcd_offset_n').value)
         self.pcd_timeout = self.get_parameter('pcd_timeout').value
+        self.rtk_gate_m = self.get_parameter('rtk_gate_m').value
+        self.rtk_gate_n = self.get_parameter('rtk_gate_n').value
+        self.rtk_gate_reset = self.get_parameter('rtk_gate_reset_s').value
+        self.rtk_streak = 0
+        self.rtk_ok = False         # RTK currently holds snap authority
+        self.last_rtk_eval_t = None
         self.last_rtk_t = None
         self.last_pcd = None        # (t, x_our, y_our, yaw)
         self.mode = 'INIT'
@@ -192,7 +227,10 @@ class MapAnchorNode(Node):
         self.last_pcd = (self.now_s(),
                          p.x + self.pcd_off[0], p.y + self.pcd_off[1],
                          yaw_of(m.pose.pose.orientation))
-        if self.odom is None or not self.th_init or self.rtk_recent():
+        # yield only to TRUSTED RTK — a suspect (gate-rejected) RTK stream
+        # must not silence the matcher, it is the reference we hold against
+        if self.odom is None or not self.th_init or \
+                (self.rtk_recent() and self.rtk_ok):
             return
         self.set_mode('PCD')
         self.snap_anchor(self.last_pcd[1], self.last_pcd[2], g=0.5)
@@ -235,16 +273,49 @@ class MapAnchorNode(Node):
         src = select_source(self.rtk_recent(),
                             self.pcd_fresh(),
                             self.pcd_topic and self.last_pcd is not None)
-        self.set_mode(src)
         if src == 'GPS_RTK':
-            # RTK-fixed sample (cm-class): snap directly — smoothing across
-            # surrounding plain-fix bias costs ~1 m at exactly the moments
-            # GPS is at its best (measured 1.23 m EMA vs 0.14 m snapped)
-            self.snap_anchor(gx, gy, g=0.5)
+            # RTK-fixed sample (cm-class) — but only a TRUSTED one may snap.
+            # Trust is earned by innovation consistency (gate_rtk), not by
+            # the receiver's own status flag: false fixes after signal
+            # recovery re-dragged the anchor and warped the graph map on the
+            # 2026-07-30 field run.
+            if not self.anchored or self.rtk_gate_m <= 0.0:
+                trusted = True
+            else:
+                ox, oy, _ = self.odom
+                tx, ty = anchor_target(gx, gy, ox, oy, self.th)
+                resid = math.hypot(tx - self.t[0], ty - self.t[1])
+                now = self.now_s()
+                gap = 0.0 if self.last_rtk_eval_t is None \
+                    else now - self.last_rtk_eval_t
+                self.last_rtk_eval_t = now
+                trusted, self.rtk_streak = gate_rtk(
+                    resid, self.rtk_streak, gap,
+                    self.rtk_gate_m, self.rtk_gate_n, self.rtk_gate_reset)
+            self.rtk_ok = trusted
+            if trusted:
+                self.set_mode('GPS_RTK')
+                # snap directly — smoothing across surrounding plain-fix
+                # bias costs ~1 m at exactly the moments GPS is at its best
+                # (measured 1.23 m EMA vs 0.14 m snapped)
+                self.snap_anchor(gx, gy, g=0.5)
+            elif self.pcd_topic and self.last_pcd is not None:
+                # matcher keeps the anchor; suspect stream observable for
+                # field debugging and the paper's ablation
+                self.set_mode('GPS_SUSPECT')
+            else:
+                # no alternative absolute reference: bounded EMA creep — a
+                # genuine offset (odom drift) still converges via the slew
+                # path and the shrinking innovation then earns trust back
+                self.set_mode('GPS_SUSPECT')
+                self.update_anchor(gx, gy)
         elif src == 'GPS':
+            self.set_mode(src)
             self.update_anchor(gx, gy)
-        # PCD / PCD_HOLD: the matcher owns the anchor — plain fixes must not
-        # re-drag it between sparse corrections
+        else:
+            # PCD / PCD_HOLD: the matcher owns the anchor — plain fixes must
+            # not re-drag it between sparse corrections
+            self.set_mode(src)
 
     def update_anchor(self, gx, gy):
         now = self.now_s()
