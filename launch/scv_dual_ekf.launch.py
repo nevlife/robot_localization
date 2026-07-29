@@ -19,6 +19,7 @@ from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from ament_index_python.packages import get_package_share_directory
 
 
@@ -52,6 +53,13 @@ def generate_launch_description():
                         'as the anchor source while GPS is degraded (no RTK). '
                         'Requires the SCV_NEW_MAP0721-family map whose georef '
                         'offset matches map_anchor pcd_offset_e/n.'),
+        DeclareLaunchArgument(
+            'anchor_rtk_gate_m', default_value='3.0',
+            description='RTK re-trust innovation gate [m]: an RTK-flagged '
+                        'fix regains snap authority only after rtk_gate_n '
+                        'consecutive samples within this distance of the '
+                        'current estimate (false "recovered" fixes warped '
+                        'the graph map, 2026-07-30 field). <=0 disables.'),
         DeclareLaunchArgument(
             'gate_max_radius_m', default_value='5000.0',
             description='GNSS sanity gate radius around the map datum; fixes '
@@ -129,6 +137,9 @@ def generate_launch_description():
                     ["'/pcd/global_pose' if '",
                      LaunchConfiguration('map_anchor_pcd'),
                      "' in ('1', 'true', 'True') else ''"]),
+                'rtk_gate_m': ParameterValue(
+                    LaunchConfiguration('anchor_rtk_gate_m'),
+                    value_type=float),
             }],
         ),
 
