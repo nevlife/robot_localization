@@ -3,8 +3,9 @@
 import math
 import sys
 
-sys.path.insert(0, '/home/ppub/scv_ws/src/robot_localization/scripts')
-from map_anchor_node import anchor_target, select_source, wrap  # noqa
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'scripts'))
+from map_anchor_node import anchor_target, gate_rtk, select_source, wrap  # noqa
 
 P = F = 0
 
@@ -39,6 +40,24 @@ for th in (0.0, 0.7, -2.0, math.pi):
     tx, ty = anchor_target(gx, gy, ox, oy, th)
     ok = math.hypot(tx - tx_true, ty - ty_true) < 1e-9
     check(f'anchor_target roundtrip th={th:.2f}', ok)
+
+# --- gate_rtk: RTK 재신뢰 혁신 게이트 ------------------------------------
+TH, N = 3.0, 5
+streak, granted_at = 0, None
+for i in range(1, 7):
+    trusted, streak = gate_rtk(0.2, streak, 0.1, TH, N)
+    if trusted and granted_at is None:
+        granted_at = i
+check('gate: 5연속 정합에서 신뢰 획득', granted_at == N, f'(granted at {granted_at})')
+trusted, streak = gate_rtk(4.5, streak, 0.1, TH, N)
+check('gate: 이상치 1개로 즉시 박탈', not trusted and streak == 0, f'(streak {streak})')
+trusted, streak = gate_rtk(0.1, streak, 0.1, TH, N)
+check('gate: 박탈 후 1개 정합으로는 미복귀', not trusted and streak == 1)
+streak = 4
+trusted, streak = gate_rtk(0.1, streak, 6.0, TH, N, reset_gap_s=5.0)
+check('gate: 6s 공백에서 streak 리셋', not trusted and streak == 1, f'(streak {streak})')
+trusted, streak = gate_rtk(TH, 4, 0.1, TH, N)
+check('gate: resid==thresh 통과(5번째로 신뢰)', trusted and streak == 5)
 
 # --- wrap ----------------------------------------------------------------
 check('wrap(3π) == π', abs(wrap(3 * math.pi) - math.pi) < 1e-9 or
