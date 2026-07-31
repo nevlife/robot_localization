@@ -67,6 +67,38 @@ def select_source(rtk_recent, pcd_fresh, pcd_ever):
     return 'GPS'
 
 
+def anchor_gain(dt, tau, cov, cov_ref=1.0):
+    """Inverse-variance weighted EMA gain (pure, unit-tested).
+
+    A fix that reports sigma=10 m must not move the anchor as fast as one
+    reporting 0.3 m. Field 2026-07-30: covariance rose to 100-420 m^2 for a
+    minute and the fixed-gain EMA followed it, sliding the map-frame
+    estimate while the vehicle barely moved. Scaling the time constant with
+    the reported variance is the Kalman-style response: gain ~ 1/cov."""
+    if cov is None or cov <= 0.0:
+        cov = cov_ref
+    return min(1.0, dt / (tau * max(1.0, cov / cov_ref)))
+
+
+def slew_limit(dx, dy, max_step, max_rate, dt):
+    """Cap one anchor correction by both a per-sample and a RATE limit.
+
+    The per-sample cap alone is frame-rate dependent: 0.5 m/sample at 10 Hz
+    is 5 m/s, four times the vehicle's own top speed, so a degraded fix
+    stream could drag the map frame faster than the robot can drive
+    (measured exactly 5.0 m/s on the 2026-07-30 run). The map->odom
+    transform describes a slowly-varying frame offset — it has no business
+    outrunning the platform."""
+    lim = max_step
+    if max_rate > 0.0:
+        lim = min(lim, max_rate * dt)
+    step = math.hypot(dx, dy)
+    if lim > 0.0 and step > lim:
+        s = lim / step
+        return dx * s, dy * s
+    return dx, dy
+
+
 def gate_rtk(resid_m, streak, gap_s, thresh_m, need, reset_gap_s=5.0):
     """RTK re-trust gate (pure, unit-tested).
 
@@ -121,6 +153,12 @@ class MapAnchorNode(Node):
         self.declare_parameter('rtk_gate_m', 3.0)
         self.declare_parameter('rtk_gate_n', 5)
         self.declare_parameter('rtk_gate_reset_s', 5.0)
+        # anchor motion ceiling [m/s]: the frame offset may not outrun the
+        # platform (vehicle max 1.3 m/s in the field profile). <=0 disables.
+        self.declare_parameter('max_slew_mps', 0.5)
+        # reported variance at which the EMA runs at its nominal time
+        # constant; larger reported variance slows anchoring proportionally
+        self.declare_parameter('cov_ref_m2', 1.0)
         # magnetic/mounting declination: map yaw = imu yaw + offset (rad)
         self.declare_parameter('yaw_offset', 0.0)
         self.declare_parameter('gps_topic', 'odometry/gps')
@@ -137,6 +175,9 @@ class MapAnchorNode(Node):
         self.rtk_gate_m = self.get_parameter('rtk_gate_m').value
         self.rtk_gate_n = self.get_parameter('rtk_gate_n').value
         self.rtk_gate_reset = self.get_parameter('rtk_gate_reset_s').value
+        self.max_slew = self.get_parameter('max_slew_mps').value
+        self.cov_ref = self.get_parameter('cov_ref_m2').value
+        self.last_cov = None        # newest gated-fix reported variance [m^2]
         self.rtk_streak = 0
         self.rtk_ok = False         # RTK currently holds snap authority
         self.last_rtk_eval_t = None
@@ -183,6 +224,8 @@ class MapAnchorNode(Node):
     def on_fix(self, m):
         if m.status.status == 2:
             self.last_rtk_t = self.now_s()
+        if m.position_covariance_type != NavSatFix.COVARIANCE_TYPE_UNKNOWN:
+            self.last_cov = m.position_covariance[0]
 
     def rtk_recent(self, window=0.3):
         return self.last_rtk_t is not None and \
@@ -200,13 +243,12 @@ class MapAnchorNode(Node):
             # slew-limit snaps too: alternating RTK<->plain observations
             # differ by the plain-fix bias (~1 m) — unlimited snapping made
             # the anchor JUMP at every mode boundary (29 jumps >1 m on bag
-            # 150709 vs main's 0). 2x the EMA slew still converges an RTK
-            # correction in 2-3 samples.
-            step = math.hypot(dx, dy)
-            lim = 2.0 * self.max_step
-            if step > lim:
-                dx *= lim / step
-                dy *= lim / step
+            # 150709 vs main's 0). 2x the EMA allowance still converges an
+            # RTK correction in 2-3 samples.
+            now = self.now_s()
+            dt = 0.1 if self.last_gps_t is None else max(1e-3, now - self.last_gps_t)
+            dx, dy = slew_limit(dx, dy, 2.0 * self.max_step,
+                                2.0 * self.max_slew, dt)
             self.t[0] += dx
             self.t[1] += dy
 
@@ -329,14 +371,13 @@ class MapAnchorNode(Node):
             self.get_logger().info(
                 f'map frame anchored: t=({tx:.2f}, {ty:.2f}) th={math.degrees(self.th):.1f} deg')
         else:
-            g = min(1.0, dt / self.xy_tau)
+            # gain follows the receiver's own reported variance: during the
+            # 2026-07-30 run it rose to 100-420 m^2 while the vehicle stood
+            # still, and a fixed gain slid the estimate metres
+            g = anchor_gain(dt, self.xy_tau, self.last_cov, self.cov_ref)
             dx = g * (tx - self.t[0])
             dy = g * (ty - self.t[1])
-            step = math.hypot(dx, dy)
-            if step > self.max_step:
-                scale = self.max_step / step
-                dx *= scale
-                dy *= scale
+            dx, dy = slew_limit(dx, dy, self.max_step, self.max_slew, dt)
             self.t[0] += dx
             self.t[1] += dy
 
