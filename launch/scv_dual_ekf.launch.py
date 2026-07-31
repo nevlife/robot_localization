@@ -61,6 +61,19 @@ def generate_launch_description():
                         'current estimate (false "recovered" fixes warped '
                         'the graph map, 2026-07-30 field). <=0 disables.'),
         DeclareLaunchArgument(
+            'max_slew_mps', default_value='0.5',
+            description='Anchor motion ceiling [m/s]. The map->odom offset '
+                        'may not outrun the platform: on 2026-07-30 a '
+                        'degraded fix stream (cov 100-420 m2) slid it at '
+                        '5 m/s vs the vehicle 1.3 m/s. 0 disables (old '
+                        'per-sample-only behaviour).'),
+        DeclareLaunchArgument(
+            'cov_ref_m2', default_value='1.0',
+            description='Reported variance at which the anchor EMA runs at '
+                        'its nominal time constant; larger reported variance '
+                        'slows anchoring proportionally (inverse-variance '
+                        'weighting). Huge value disables the weighting.'),
+        DeclareLaunchArgument(
             'gate_max_radius_m', default_value='5000.0',
             description='GNSS sanity gate radius around the map datum; fixes '
                         'farther than this are dropped before navsat (blocks '
@@ -140,6 +153,10 @@ def generate_launch_description():
                 'rtk_gate_m': ParameterValue(
                     LaunchConfiguration('anchor_rtk_gate_m'),
                     value_type=float),
+                'max_slew_mps': ParameterValue(
+                    LaunchConfiguration('max_slew_mps'), value_type=float),
+                'cov_ref_m2': ParameterValue(
+                    LaunchConfiguration('cov_ref_m2'), value_type=float),
             }],
         ),
 
