@@ -73,19 +73,77 @@ for k in range(100):
     x -= 0.10                     # 후진
     if cal2.add(t, x, 0.0, 0.0, v=-1.0, wz=0.0) is not None:
         polluted += 1
-check('autocal 후진 게이트 (측정 0)', polluted == 0 and cal2.n == 0
-      and len(cal2.buf) == 0)
+check('autocal 후진 게이트 (측정 0)', polluted == 0 and cal2.n == 0)
 
-# 전진→후진→전진: 후진이 창을 리셋해 전진 표본끼리 이어붙지 않아야 한다
+# 순후진 뒤 재전진: 후진 잔재가 첫 전진 측정을 오염시키지 않아야 한다
+# (후진 변위 방위는 헤딩의 정반대 — 이월되면 180도 오염)
 cal3 = YawAutocal()
-t = 0.0
-cal3.add(t, 0.0, 0.0, 0.0, v=1.0, wz=0.0)
-t += 0.1
-cal3.add(t, -0.1, 0.0, 0.0, v=-0.5, wz=0.0)   # 후진 → 창 무효
-check('autocal 후진 시 창 리셋', len(cal3.buf) == 0)
-t += 0.1
-got = cal3.add(t, 0.5, 0.0, 0.0, v=1.0, wz=0.0)
-check('autocal 리셋 직후 새 창 (측정 미성립)', got is None and cal3.n == 0)
+t = x = 0.0
+cal3.add(t, x, 0.0, 0.0, v=1.0, wz=0.0)
+for k in range(8):                # 0.8 m 순후진 (도중 창 폐기 발동)
+    t += 0.1
+    x -= 0.1
+    cal3.add(t, x, 0.0, 0.0, v=-1.0, wz=0.0)
+first = None
+for k in range(20):               # 재전진 — 첫 측정의 오차각 확인
+    t += 0.1
+    x += 0.1
+    e = cal3.add(t, x, 0.0, 0.0, v=1.0, wz=0.0)
+    if e is not None:
+        first = e
+        break
+check('autocal 순후진 후 재전진 첫 측정 무오염',
+      first is not None and abs(math.degrees(first)) < 5.0,
+      f'(err {math.degrees(first):.1f}deg)' if first is not None else '(측정 없음)')
+
+# 전진+후진 혼합 창: chord 가 odo 의 0.8배 미달이라 측정이 안 나와야 한다
+cal3m = YawAutocal()
+t = x = 0.0
+mixed = 0
+for k in range(12):               # 1.2 m 전진
+    t += 0.1
+    x += 0.1
+    if cal3m.add(t, x, 0.0, 0.0, v=1.0, wz=0.0) is not None:
+        mixed += 1
+# 측정은 났을 수 있음(순전진 구간) — 이제 0.5 m 후진 후 다시 0.5 m 전진:
+# chord ~1.2 인데 odo ~1.2+(-0.5)+0.5 중 창 내 혼합 구간은 odo < 0.8*chord
+cal3m.buf.clear(); cal3m.n = 0
+for k in range(5):
+    t += 0.1
+    x -= 0.1
+    cal3m.add(t, x, 0.0, 0.0, v=-1.0, wz=0.0)
+for k in range(5):
+    t += 0.1
+    x += 0.1
+    cal3m.add(t, x, 0.0, 0.0, v=1.0, wz=0.0)
+check('autocal 혼합(왕복) 창 측정 없음', cal3m.n == 0)
+
+# EKF twist 노이즈 내성: 실제 전진 1 m/s 인데 twist 가 -0.1~+0.4 로 요동
+# (챔버 실측 재현) — 순간 부호로 창을 버리면 측정 0회가 되는 상황.
+# odo 는 잡음 평균만큼 과소평가되지만 0.8 게이트 안에서 측정이 성립해야 한다.
+cal_ns = YawAutocal(alpha=0.3, n_apply=3)
+t = x = 0.0
+random.seed(11)
+for k in range(300):
+    t += 0.1
+    x += 0.10
+    v_noisy = 1.0 + random.gauss(0.0, 0.35)   # 간헐 음수 포함
+    cal_ns.add(t, x, 0.0, wrap(0.0 - TRUE), v=v_noisy, wz=0.0)
+check('autocal twist 노이즈 내성 (측정 발생+수렴)', cal_ns.n >= 3 and
+      abs(wrap(cal_ns.corr - TRUE)) < math.radians(5),
+      f'(n {cal_ns.n}, corr {math.degrees(cal_ns.corr):.1f}deg)')
+
+# GPS 점프 기각: 창 중간 5 m 점프 → chord 폭증하지만 odo 불변 → 무측정
+cal_j = YawAutocal()
+t = x = 0.0
+jmp = 0
+for k in range(6):
+    t += 0.1
+    x += 0.1
+    cal_j.add(t, x, 0.0, 0.0, v=1.0, wz=0.0)
+if cal_j.add(t + 0.1, x + 5.0, 0.0, 0.0, v=1.0, wz=0.0) is not None:
+    jmp += 1
+check('autocal GPS 점프 기각', jmp == 0)
 
 # 급회전 표본은 보류하되 창은 유지한다 (완만한 곡선은 유효 표본 —
 # 등곡률 호에서 chord 방위 = 중간점 방위)

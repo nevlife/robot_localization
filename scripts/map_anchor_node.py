@@ -133,23 +133,31 @@ class YawAutocal:
 
     측정: 전진 중 GPS 변위(chord)의 방위 - 창 중앙 IMU yaw. 등곡률 호에서
     chord 방위 = 중간점 방위이므로 완만한 곡선 주행도 유효한 표본이다 —
-    덕분에 '직진' 강제 게이트가 필요 없다(급회전 |wz|>wz_max 만 표본 보류).
-    창을 무효화하는 것은 후진/정지(v<=0)뿐: 후진 변위 방위는 헤딩의
-    정반대라 추정을 180도 오염시키므로 v 부호 게이트가 본질이다. 기저선
-    d_min 은 fix 품질에 적응한다(방위 노이즈 ~ sqrt(2)*sigma/d 이므로
-    d >= 10*sigma 면 ~8도 이하; RTK fixed sigma 2 cm 는 0.8 m 로 충분).
-    처음 8/3-8/4 실bag 검증에서 고정 게이트(v>=0.3 연속+직진+1.5 m)는
-    측정 0회였다 — RC 플래핑으로 연속 3 s 전진 자체가 없는 날이었고,
-    그런 날일수록 보정이 필요하다. 창은 비중첩(측정 후 buf 초기화)이라
-    EMA 표본이 서로 독립이고, 벡터(복소) EMA 라 +-180도 경계에서도
-    평균이 붕괴하지 않는다."""
+    '직진' 강제 게이트가 필요 없다(급회전 |wz|>wz_max 만 표본 보류).
+    기저선 d_min 은 fix 품질에 적응한다(방위 노이즈 ~ sqrt(2)*sigma/d
+    이므로 d >= 10*sigma 면 ~8도 이하; RTK fixed sigma 2 cm 는 0.8 m 로
+    충분). 처음 8/3-8/4 실bag 검증에서 고정 게이트(v>=0.3 연속+직진
+    +1.5 m)는 측정 0회였다 — RC 플래핑으로 연속 3 s 전진 자체가 없는
+    날이었고, 그런 날일수록 보정이 필요하다.
+
+    전진 판정은 순간 v 부호가 아니라 **창 적분 일관성**이다: 엔코더 적분
+    주행거리 odo = sum(v*dt) 가 chord 의 0.8배 이상일 때만 측정한다.
+    순간 부호 게이트(v<=0 시 창 무효)는 챔버 검증에서 EKF twist 노이즈
+    (주행 중 -0.09~+0.31 요동)에 창이 매초 리셋되어 측정 0회가 됐다.
+    적분 판정은 노이즈에 둔감하면서 오염원을 전부 자동 기각한다:
+    순후진(odo<0), 유턴(호>106도부터 chord/호 < 0.8), 전진+후진 혼합
+    (chord 축소), GPS 점프(chord 폭증, odo 불변), 정지 노이즈(odo~0).
+    net 후진 -0.3 m 에서 창을 버려 재전진 시 오염 이월도 막는다.
+    창은 비중첩(측정 후 buf 초기화)이라 EMA 표본이 서로 독립이고,
+    벡터(복소) EMA 라 +-180도 경계에서도 평균이 붕괴하지 않는다."""
 
     def __init__(self, v_min=0.15, wz_max=0.5, d_min=0.8, t_max=12.0,
                  alpha=0.15, n_apply=6):
         self.v_min, self.wz_max = v_min, wz_max
         self.d_min, self.t_max = d_min, t_max
         self.alpha, self.n_apply = alpha, n_apply
-        self.buf = []            # (t, x, y, hdg, cov) — 게이트 통과 표본
+        self.buf = []            # (t, x, y, hdg, cov, dv) — 양질 표본
+        self._t_prev = None
         self.zr = self.zi = 0.0
         self.n = 0
         self.corr = 0.0          # 추정 보정 [rad] — active 일 때만 신뢰
@@ -157,18 +165,22 @@ class YawAutocal:
 
     def add(self, t, x, y, hdg, v, wz, cov=0.0):
         """양질 fix 1표본 투입. 측정이 성립하면 그 오차각[rad]을 반환."""
-        if v <= 0.0:
-            self.buf.clear()     # 후진/정지 혼입 방지 — 창 전체 무효
-            return None
-        if v < self.v_min or abs(wz) > self.wz_max:
-            return None          # 저속/급회전: 표본만 보류, 창은 유지
-        self.buf.append((t, x, y, hdg, max(0.0, cov)))
+        dt = 0.0 if self._t_prev is None else min(1.0, max(0.0, t - self._t_prev))
+        self._t_prev = t
+        if abs(wz) > self.wz_max:
+            return None          # 급회전: 표본 보류 (창은 유지)
+        self.buf.append((t, x, y, hdg, max(0.0, cov), v * dt))
         while self.buf and t - self.buf[0][0] > self.t_max:
             self.buf.pop(0)
+        odo = sum(b[5] for b in self.buf)
+        if odo < -0.3:
+            self.buf.clear()     # 확실한 순후진 — 재전진 시 오염 이월 방지
+            return None
         t0, x0, y0 = self.buf[0][:3]
+        d = math.hypot(x - x0, y - y0)
         d_req = max(self.d_min,
                     10.0 * math.sqrt(max(b[4] for b in self.buf)))
-        if math.hypot(x - x0, y - y0) < d_req:
+        if d < d_req or odo < 0.8 * d:
             return None
         err = wrap(math.atan2(y - y0, x - x0)
                    - self.buf[len(self.buf) // 2][3])
