@@ -36,7 +36,7 @@ from rclpy.node import Node
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Imu, NavSatFix
 from std_msgs.msg import String
-from geometry_msgs.msg import TransformStamped
+from geometry_msgs.msg import PoseWithCovarianceStamped, TransformStamped
 from tf2_ros import TransformBroadcaster
 
 
@@ -144,6 +144,15 @@ class MapAnchorNode(Node):
         self.declare_parameter('pcd_timeout', 3.0)         # [s] freshness —
                                                            # rides matcher
                                                            # MayLost cycles
+        # ---- PCD 웜스타트 (fusion 콜드스타트 해결, 2026-08-04) ----------
+        # 정합기(lio_feature_map_localizer)의 전역 초기화(BBS)는 초기 포즈
+        # 없이 수렴하지 못한다(재생 2/2 미수렴 — 하이브리드의 유일한
+        # 블로커였다). 우리 앵커 추정(측정: float GPS 에서 σ~0.2 m)을
+        # 정합기 프레임으로 역변환해 /initialpose 로 주기 주입한다.
+        # PCD 가 신선해지면(정합 성공) 자동 중단, 다시 잃으면 재개.
+        # <=0 이면 비활성.
+        self.declare_parameter('pcd_warmstart_period', 5.0)
+        self.declare_parameter('pcd_init_topic', '/initialpose')
         # ---- RTK re-trust (innovation) gate ------------------------------
         # thresh aligned with the chamber's GPS_DIVERGE_M; <=0 disables the
         # gate (pre-2026-07-30 behaviour) for A/B and field rollback. NB a
@@ -172,6 +181,13 @@ class MapAnchorNode(Node):
         self.pcd_off = (self.get_parameter('pcd_offset_e').value,
                         self.get_parameter('pcd_offset_n').value)
         self.pcd_timeout = self.get_parameter('pcd_timeout').value
+        self.warm_period = self.get_parameter('pcd_warmstart_period').value
+        self._last_warm = 0.0
+        self.pub_init = None
+        if self.pcd_topic and self.warm_period > 0:
+            self.pub_init = self.create_publisher(
+                PoseWithCovarianceStamped,
+                self.get_parameter('pcd_init_topic').value, 10)
         self.rtk_gate_m = self.get_parameter('rtk_gate_m').value
         self.rtk_gate_n = self.get_parameter('rtk_gate_n').value
         self.rtk_gate_reset = self.get_parameter('rtk_gate_reset_s').value
@@ -404,6 +420,31 @@ class MapAnchorNode(Node):
         out.pose.pose.orientation.z = math.sin(myaw / 2.0)
         out.pose.pose.orientation.w = math.cos(myaw / 2.0)
         self.pub_global.publish(out)
+
+        # PCD 웜스타트: 정합이 없는(또는 끊긴) 동안 우리 map 추정을 정합기
+        # 프레임(= map − pcd_off, 회전 없음: 번들 Position=UTM−origin 검증)
+        # 으로 되돌려 /initialpose 로 주입한다. 앵커가 실제 fix 로 정착한
+        # 뒤에만(INIT/부트스트랩 제외) — 부트스트랩 (0,0) 을 주입하면
+        # 정합기가 datum 근처를 헛수색한다.
+        if self.pub_init is not None and self.mode != 'INIT' \
+                and not self.pcd_fresh():
+            now = self.now_s()
+            if now - self._last_warm >= self.warm_period:
+                self._last_warm = now
+                ip = PoseWithCovarianceStamped()
+                ip.header.stamp = stamp
+                ip.header.frame_id = 'map'
+                ip.pose.pose.position.x = out.pose.pose.position.x - self.pcd_off[0]
+                ip.pose.pose.position.y = out.pose.pose.position.y - self.pcd_off[1]
+                ip.pose.pose.orientation = out.pose.pose.orientation
+                ip.pose.covariance[0] = 9.0    # x  3 m 시드 반경
+                ip.pose.covariance[7] = 9.0    # y
+                ip.pose.covariance[35] = 0.07  # yaw ~15도
+                self.pub_init.publish(ip)
+                self.get_logger().info(
+                    f'PCD warm-start seed -> ({ip.pose.pose.position.x:.1f}, '
+                    f'{ip.pose.pose.position.y:.1f}) [pcd frame]',
+                    throttle_duration_sec=self.warm_period)
 
 
 def main():
