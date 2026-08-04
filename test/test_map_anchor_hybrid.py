@@ -4,7 +4,7 @@ import math
 import sys
 
 sys.path.insert(0, '/home/ppub/scv_ws/src/robot_localization/scripts')
-from map_anchor_node import anchor_target, select_source, wrap  # noqa
+from map_anchor_node import YawAutocal, anchor_target, select_source, wrap  # noqa
 
 P = F = 0
 
@@ -39,6 +39,113 @@ for th in (0.0, 0.7, -2.0, math.pi):
     tx, ty = anchor_target(gx, gy, ox, oy, th)
     ok = math.hypot(tx - tx_true, ty - ty_true) < 1e-9
     check(f'anchor_target roundtrip th={th:.2f}', ok)
+
+# --- YawAutocal: 온라인 yaw 오프셋 추정 ----------------------------------
+# 시나리오: IMU 가 167도 어긋난 차량(2026-08-04 실측)이 동쪽으로 직진.
+# 실제 진행방위 0, IMU 헤딩 = -167도 → 추정기는 +167도 근방으로 수렴해야
+# 하고, ±180 경계를 넘나드는 노이즈에서도 벡터 EMA 평균이 무너지지 않아야.
+import random
+random.seed(7)
+TRUE = math.radians(167.0)
+cal = YawAutocal(v_min=0.3, d_min=1.5, alpha=0.3, n_apply=6)
+t = 0.0
+x = 0.0
+meas = 0
+for k in range(400):
+    t += 0.1
+    x += 0.10                     # 1.0 m/s 동진
+    hdg = wrap(0.0 - TRUE + random.gauss(0.0, math.radians(3)))
+    gx = x + random.gauss(0.0, 0.02)
+    gy = random.gauss(0.0, 0.02)
+    if cal.add(t, gx, gy, hdg, v=1.0, wz=0.0) is not None:
+        meas += 1
+check('autocal 167deg 수렴', cal.active and
+      abs(wrap(cal.corr - TRUE)) < math.radians(5),
+      f'(corr {math.degrees(cal.corr):.1f}deg, meas {meas})')
+
+# 후진 게이트: 후진(v<=0)은 창 전체를 무효화해야 한다 — 후진 변위 방위는
+# 헤딩의 정반대라 추정을 180도 오염시킨다
+cal2 = YawAutocal()
+t = x = 0.0
+polluted = 0
+for k in range(100):
+    t += 0.1
+    x -= 0.10                     # 후진
+    if cal2.add(t, x, 0.0, 0.0, v=-1.0, wz=0.0) is not None:
+        polluted += 1
+check('autocal 후진 게이트 (측정 0)', polluted == 0 and cal2.n == 0
+      and len(cal2.buf) == 0)
+
+# 전진→후진→전진: 후진이 창을 리셋해 전진 표본끼리 이어붙지 않아야 한다
+cal3 = YawAutocal()
+t = 0.0
+cal3.add(t, 0.0, 0.0, 0.0, v=1.0, wz=0.0)
+t += 0.1
+cal3.add(t, -0.1, 0.0, 0.0, v=-0.5, wz=0.0)   # 후진 → 창 무효
+check('autocal 후진 시 창 리셋', len(cal3.buf) == 0)
+t += 0.1
+got = cal3.add(t, 0.5, 0.0, 0.0, v=1.0, wz=0.0)
+check('autocal 리셋 직후 새 창 (측정 미성립)', got is None and cal3.n == 0)
+
+# 급회전 표본은 보류하되 창은 유지한다 (완만한 곡선은 유효 표본 —
+# 등곡률 호에서 chord 방위 = 중간점 방위)
+cal3b = YawAutocal()
+t = 0.0
+cal3b.add(t, 0.0, 0.0, 0.0, v=1.0, wz=0.0)
+t += 0.1
+cal3b.add(t, 0.1, 0.0, 0.0, v=1.0, wz=1.0)    # 급회전 → 보류
+check('autocal 급회전 보류 (창 유지)', len(cal3b.buf) == 1)
+
+# 곡선 주행: 반경 5 m 호를 따라 돌 때 중간점 헤딩 대조로 오프셋이 맞아야
+cal_arc = YawAutocal(alpha=0.4, n_apply=3)
+R, w = 5.0, 0.15                  # v = 0.75 m/s
+t = 0.0
+for k in range(2000):
+    t += 0.1
+    a = w * t
+    hdg_true = wrap(a + math.pi / 2)          # 접선 방위
+    cal_arc.add(t, R * math.cos(a), R * math.sin(a),
+                wrap(hdg_true - TRUE), v=R * w, wz=w)
+check('autocal 곡선 주행 수렴', cal_arc.n > 3 and
+      abs(wrap(cal_arc.corr - TRUE)) < math.radians(5),
+      f'(corr {math.degrees(cal_arc.corr):.1f}deg, n {cal_arc.n})')
+
+# 정지/저속 게이트: GPS 노이즈만 있는 정지 상태에서 측정이 나오면 안 된다
+cal4 = YawAutocal()
+t = 0.0
+still = 0
+for k in range(100):
+    t += 0.1
+    if cal4.add(t, random.gauss(0, 0.3), random.gauss(0, 0.3), 0.0,
+                v=0.05, wz=0.0) is not None:
+        still += 1
+check('autocal 정지 게이트 (측정 0)', still == 0)
+
+# 품질 적응 기저선: 열화 fix(cov 0.04, sigma 20 cm)는 d_req=2 m 로 늘어나
+# 0.9 m 변위로는 측정이 성립하지 않아야 (RTK 였다면 성립하는 거리)
+cal6 = YawAutocal()
+t = x = 0.0
+early = 0
+while x < 0.9:
+    t += 0.1
+    x += 0.1
+    if cal6.add(t, x, 0.0, 0.0, v=1.0, wz=0.0, cov=0.04) is not None:
+        early += 1
+check('autocal 품질 적응 d_req (열화 fix 0.9m 측정 0)', early == 0)
+while x < 2.5:                    # 10*sqrt(0.04)=2.0 m 넘기면 성립
+    t += 0.1
+    x += 0.1
+    cal6.add(t, x, 0.0, 0.0, v=1.0, wz=0.0, cov=0.04)
+check('autocal 품질 적응 d_req (2m 초과 시 측정)', cal6.n >= 1)
+
+# n_apply 전에는 active 금지 (표본 부족 상태의 섣부른 적용 방지)
+cal5 = YawAutocal(n_apply=6)
+t = x = 0.0
+while cal5.n < 5:
+    t += 0.1
+    x += 0.1
+    cal5.add(t, x, 0.0, 0.0, v=1.0, wz=0.0)
+check('autocal n_apply 전 inactive', not cal5.active and cal5.n == 5)
 
 # --- wrap ----------------------------------------------------------------
 check('wrap(3π) == π', abs(wrap(3 * math.pi) - math.pi) < 1e-9 or

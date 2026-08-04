@@ -35,7 +35,7 @@ import rclpy
 from rclpy.node import Node
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Imu, NavSatFix
-from std_msgs.msg import String
+from std_msgs.msg import Float32, String
 from geometry_msgs.msg import PoseWithCovarianceStamped, TransformStamped
 from tf2_ros import TransformBroadcaster
 
@@ -119,6 +119,68 @@ def gate_rtk(resid_m, streak, gap_s, thresh_m, need, reset_gap_s=5.0):
     return streak >= need, streak
 
 
+class YawAutocal:
+    """GPS 진행방위로 IMU 절대 yaw 의 상수 오프셋을 온라인 추정 (pure).
+
+    2026-08-04 필드: 실외 자율주행 전 시나리오가 목표 반대로 주행했다.
+    bag 130 정량화 — 자율 전진(CAN·명령+·엔코더+) 창에서 IMU yaw 대비
+    RTK 실이동 방위가 중앙 167도(p25/p75 165/168), RC 후진 창에서는 -1도
+    (후진x180도 상쇄) — IMU 가 차체 후방을 전방으로 보고한다(장착 반전
+    + 자북 편차 추정). 앵커 th = imu - odom 이 통째로 오염되어 map 프레임이
+    반전, waypoint 가 차량 기준 정반대에 투영된 것이 반대 주행의 전모.
+    챔버(시뮬 IMU)·bag 재생(개루프)·RC 수동(IMU 미사용)이 모두 못 보는
+    조합이라 실차 폐루프에서만 드러났다.
+
+    측정: 전진 중 GPS 변위(chord)의 방위 - 창 중앙 IMU yaw. 등곡률 호에서
+    chord 방위 = 중간점 방위이므로 완만한 곡선 주행도 유효한 표본이다 —
+    덕분에 '직진' 강제 게이트가 필요 없다(급회전 |wz|>wz_max 만 표본 보류).
+    창을 무효화하는 것은 후진/정지(v<=0)뿐: 후진 변위 방위는 헤딩의
+    정반대라 추정을 180도 오염시키므로 v 부호 게이트가 본질이다. 기저선
+    d_min 은 fix 품질에 적응한다(방위 노이즈 ~ sqrt(2)*sigma/d 이므로
+    d >= 10*sigma 면 ~8도 이하; RTK fixed sigma 2 cm 는 0.8 m 로 충분).
+    처음 8/3-8/4 실bag 검증에서 고정 게이트(v>=0.3 연속+직진+1.5 m)는
+    측정 0회였다 — RC 플래핑으로 연속 3 s 전진 자체가 없는 날이었고,
+    그런 날일수록 보정이 필요하다. 창은 비중첩(측정 후 buf 초기화)이라
+    EMA 표본이 서로 독립이고, 벡터(복소) EMA 라 +-180도 경계에서도
+    평균이 붕괴하지 않는다."""
+
+    def __init__(self, v_min=0.15, wz_max=0.5, d_min=0.8, t_max=12.0,
+                 alpha=0.15, n_apply=6):
+        self.v_min, self.wz_max = v_min, wz_max
+        self.d_min, self.t_max = d_min, t_max
+        self.alpha, self.n_apply = alpha, n_apply
+        self.buf = []            # (t, x, y, hdg, cov) — 게이트 통과 표본
+        self.zr = self.zi = 0.0
+        self.n = 0
+        self.corr = 0.0          # 추정 보정 [rad] — active 일 때만 신뢰
+        self.active = False
+
+    def add(self, t, x, y, hdg, v, wz, cov=0.0):
+        """양질 fix 1표본 투입. 측정이 성립하면 그 오차각[rad]을 반환."""
+        if v <= 0.0:
+            self.buf.clear()     # 후진/정지 혼입 방지 — 창 전체 무효
+            return None
+        if v < self.v_min or abs(wz) > self.wz_max:
+            return None          # 저속/급회전: 표본만 보류, 창은 유지
+        self.buf.append((t, x, y, hdg, max(0.0, cov)))
+        while self.buf and t - self.buf[0][0] > self.t_max:
+            self.buf.pop(0)
+        t0, x0, y0 = self.buf[0][:3]
+        d_req = max(self.d_min,
+                    10.0 * math.sqrt(max(b[4] for b in self.buf)))
+        if math.hypot(x - x0, y - y0) < d_req:
+            return None
+        err = wrap(math.atan2(y - y0, x - x0)
+                   - self.buf[len(self.buf) // 2][3])
+        self.zr = (1.0 - self.alpha) * self.zr + self.alpha * math.cos(err)
+        self.zi = (1.0 - self.alpha) * self.zi + self.alpha * math.sin(err)
+        self.n += 1
+        self.corr = math.atan2(self.zi, self.zr)
+        self.active = self.n >= self.n_apply
+        self.buf.clear()
+        return err
+
+
 class MapAnchorNode(Node):
     def __init__(self):
         super().__init__('map_anchor')
@@ -170,6 +232,14 @@ class MapAnchorNode(Node):
         self.declare_parameter('cov_ref_m2', 1.0)
         # magnetic/mounting declination: map yaw = imu yaw + offset (rad)
         self.declare_parameter('yaw_offset', 0.0)
+        # ---- yaw 자동 보정 (2026-08-04 반대주행 근본 대책) ---------------
+        # yaw_offset 위에 얹히는 잔차를 주행 중 온라인 추정 — YawAutocal
+        # docstring 참조. max_cov 는 '양질 fix' 판정(sigma ~22 cm; RTK
+        # float 급이면 통과). 비활성화는 yaw_autocal:=false.
+        self.declare_parameter('yaw_autocal', True)
+        self.declare_parameter('yaw_autocal_min_v', 0.15)    # [m/s]
+        self.declare_parameter('yaw_autocal_min_d', 0.8)     # [m]
+        self.declare_parameter('yaw_autocal_max_cov', 0.05)  # [m^2]
         self.declare_parameter('gps_topic', 'odometry/gps')
         self.declare_parameter('odom_topic', '/odom')
         self.declare_parameter('imu_topic', '/vectornav/imu')
@@ -201,9 +271,19 @@ class MapAnchorNode(Node):
         self.last_pcd = None        # (t, x_our, y_our, yaw)
         self.mode = 'INIT'
         self.yaw_offset = self.get_parameter('yaw_offset').value
+        self.autocal = None
+        if self.get_parameter('yaw_autocal').value:
+            self.autocal = YawAutocal(
+                v_min=self.get_parameter('yaw_autocal_min_v').value,
+                d_min=self.get_parameter('yaw_autocal_min_d').value)
+        self.autocal_max_cov = self.get_parameter('yaw_autocal_max_cov').value
+        self._cal_active = False
 
         self.odom = None            # (x, y, yaw) in odom frame
+        self.odom_v = 0.0           # ekf_odom 전진 속도 (엔코더 부호)
+        self.odom_wz = 0.0
         self.imu_yaw = None         # absolute yaw (map convention)
+        self.imu_yaw_uncal = None   # raw + 정적 yaw_offset (autocal 미적용)
         self.t = None               # map->odom translation [x, y]
         self.th = 0.0               # map->odom yaw
         self.th_init = False
@@ -221,6 +301,7 @@ class MapAnchorNode(Node):
         # RTK detection from the gated fix stream (sane fixes only)
         self.create_subscription(NavSatFix, '/gps/fix_gated', self.on_fix, 30)
         self.pub_mode = self.create_publisher(String, 'map_anchor/mode', 10)
+        self.pub_corr = self.create_publisher(Float32, 'map_anchor/yaw_corr', 10)
         if self.pcd_topic:
             self.create_subscription(Odometry, self.pcd_topic, self.on_pcd, 30)
         self.get_logger().info(
@@ -294,11 +375,16 @@ class MapAnchorNode(Node):
         self.snap_anchor(self.last_pcd[1], self.last_pcd[2], g=0.5)
 
     def on_imu(self, m):
-        self.imu_yaw = wrap(yaw_of(m.orientation) + self.yaw_offset)
+        self.imu_yaw_uncal = wrap(yaw_of(m.orientation) + self.yaw_offset)
+        corr = self.autocal.corr \
+            if self.autocal is not None and self.autocal.active else 0.0
+        self.imu_yaw = wrap(self.imu_yaw_uncal + corr)
 
     def on_odom(self, m):
         p = m.pose.pose.position
         self.odom = (p.x, p.y, yaw_of(m.pose.pose.orientation))
+        self.odom_v = m.twist.twist.linear.x
+        self.odom_wz = m.twist.twist.angular.z
         # yaw anchor updates at odom rate (imu+odom both live even without GPS)
         if self.imu_yaw is not None:
             target = wrap(self.imu_yaw - self.odom[2])
@@ -328,6 +414,36 @@ class MapAnchorNode(Node):
         # noisier source cannot fight the better one (mirrors main's
         # GPS_ACTIVE -> PCD_ACTIVE handover)
         gx, gy = m.pose.pose.position.x, m.pose.pose.position.y
+        # yaw 자동 보정: 소스 선택과 무관하게 양질 fix 는 전부 측정에 쓴다
+        # (측정은 앵커 상태에 의존하지 않는 절대 관측이므로)
+        if self.autocal is not None and self.imu_yaw_uncal is not None and \
+                (self.rtk_recent() or
+                 (self.last_cov is not None
+                  and self.last_cov <= self.autocal_max_cov)):
+            e = self.autocal.add(self.now_s(), gx, gy, self.imu_yaw_uncal,
+                                 self.odom_v, self.odom_wz,
+                                 self.last_cov or 0.0)
+            if e is not None:
+                self.pub_corr.publish(Float32(data=self.autocal.corr))
+                self.get_logger().info(
+                    f'yaw autocal: meas {math.degrees(e):+.1f}deg -> '
+                    f'corr {math.degrees(self.autocal.corr):+.1f}deg '
+                    f'(n={self.autocal.n})', throttle_duration_sec=5.0)
+                if self.autocal.active and not self._cal_active and \
+                        abs(self.autocal.corr) > math.radians(20):
+                    # 큰 보정의 첫 적용: th 를 즉시 회전시키고 앵커를
+                    # 재스냅한다. EMA(yaw_tau)로 수십 초에 걸쳐 돌리면
+                    # 그동안 모든 waypoint 가 틀린 곳에 투영된 채 주행하는
+                    # 중간 상태가 생긴다 — 반대주행을 고치려다 비스듬주행을
+                    # 만드는 꼴. 아래 소스 선택이 같은 콜백에서 이어지므로
+                    # anchored=False 는 이번 fix 로 즉시 재스냅된다.
+                    self.th = wrap(self.th + self.autocal.corr)
+                    self.anchored = False
+                    self.rtk_streak = 0
+                    self.get_logger().warn(
+                        f'yaw autocal ENGAGED: th rotated '
+                        f'{math.degrees(self.autocal.corr):+.1f}deg, re-anchoring')
+                self._cal_active = self.autocal.active
         src = select_source(self.rtk_recent(),
                             self.pcd_fresh(),
                             self.pcd_topic and self.last_pcd is not None)

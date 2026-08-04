@@ -61,6 +61,22 @@ def generate_launch_description():
                         'current estimate (false "recovered" fixes warped '
                         'the graph map, 2026-07-30 field). <=0 disables.'),
         DeclareLaunchArgument(
+            'anchor_yaw_offset', default_value='0.0',
+            description='Static yaw added to the IMU absolute yaw [rad]. '
+                        'Field 2026-08-04: the VectorNav yaw reference is '
+                        'NOT magnetically anchored — per-session arbitrary '
+                        'offsets were measured (+62 deg on 08-03, +170 deg '
+                        'on 08-04, opposite-to-goal driving). So no static '
+                        'value can be correct; this arg exists for fault '
+                        'injection in the chamber and for A/B only. The '
+                        'online estimator (anchor_yaw_autocal) is the fix.'),
+        DeclareLaunchArgument(
+            'anchor_yaw_autocal', default_value='true',
+            description='Online yaw-offset estimation from GPS course vs '
+                        'IMU yaw during confirmed forward motion (see '
+                        'YawAutocal in map_anchor_node.py). false = rollback '
+                        'to raw IMU yaw.'),
+        DeclareLaunchArgument(
             'gate_max_radius_m', default_value='5000.0',
             description='GNSS sanity gate radius around the map datum; fixes '
                         'farther than this are dropped before navsat (blocks '
@@ -140,6 +156,12 @@ def generate_launch_description():
                 'rtk_gate_m': ParameterValue(
                     LaunchConfiguration('anchor_rtk_gate_m'),
                     value_type=float),
+                'yaw_offset': ParameterValue(
+                    LaunchConfiguration('anchor_yaw_offset'),
+                    value_type=float),
+                'yaw_autocal': ParameterValue(
+                    LaunchConfiguration('anchor_yaw_autocal'),
+                    value_type=bool),
             }],
         ),
 
