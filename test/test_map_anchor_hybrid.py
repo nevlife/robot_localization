@@ -47,7 +47,7 @@ for th in (0.0, 0.7, -2.0, math.pi):
 import random
 random.seed(7)
 TRUE = math.radians(167.0)
-cal = YawAutocal(v_min=0.3, d_min=1.5, alpha=0.3, n_apply=6)
+cal = YawAutocal(d_min=1.5, alpha=0.3, n_apply=6)
 t = 0.0
 x = 0.0
 meas = 0
@@ -57,7 +57,7 @@ for k in range(400):
     hdg = wrap(0.0 - TRUE + random.gauss(0.0, math.radians(3)))
     gx = x + random.gauss(0.0, 0.02)
     gy = random.gauss(0.0, 0.02)
-    if cal.add(t, gx, gy, hdg, v=1.0, wz=0.0) is not None:
+    if cal.add(t, gx, gy, hdg, x, wz=0.0) is not None:
         meas += 1
 check('autocal 167deg 수렴', cal.active and
       abs(wrap(cal.corr - TRUE)) < math.radians(5),
@@ -71,7 +71,7 @@ polluted = 0
 for k in range(100):
     t += 0.1
     x -= 0.10                     # 후진
-    if cal2.add(t, x, 0.0, 0.0, v=-1.0, wz=0.0) is not None:
+    if cal2.add(t, x, 0.0, 0.0, x, wz=0.0) is not None:
         polluted += 1
 check('autocal 후진 게이트 (측정 0)', polluted == 0 and cal2.n == 0)
 
@@ -79,16 +79,16 @@ check('autocal 후진 게이트 (측정 0)', polluted == 0 and cal2.n == 0)
 # (후진 변위 방위는 헤딩의 정반대 — 이월되면 180도 오염)
 cal3 = YawAutocal()
 t = x = 0.0
-cal3.add(t, x, 0.0, 0.0, v=1.0, wz=0.0)
+cal3.add(t, x, 0.0, 0.0, x, wz=0.0)
 for k in range(8):                # 0.8 m 순후진 (도중 창 폐기 발동)
     t += 0.1
     x -= 0.1
-    cal3.add(t, x, 0.0, 0.0, v=-1.0, wz=0.0)
+    cal3.add(t, x, 0.0, 0.0, x, wz=0.0)
 first = None
 for k in range(20):               # 재전진 — 첫 측정의 오차각 확인
     t += 0.1
     x += 0.1
-    e = cal3.add(t, x, 0.0, 0.0, v=1.0, wz=0.0)
+    e = cal3.add(t, x, 0.0, 0.0, x, wz=0.0)
     if e is not None:
         first = e
         break
@@ -103,7 +103,7 @@ mixed = 0
 for k in range(12):               # 1.2 m 전진
     t += 0.1
     x += 0.1
-    if cal3m.add(t, x, 0.0, 0.0, v=1.0, wz=0.0) is not None:
+    if cal3m.add(t, x, 0.0, 0.0, x, wz=0.0) is not None:
         mixed += 1
 # 측정은 났을 수 있음(순전진 구간) — 이제 0.5 m 후진 후 다시 0.5 m 전진:
 # chord ~1.2 인데 odo ~1.2+(-0.5)+0.5 중 창 내 혼합 구간은 odo < 0.8*chord
@@ -111,24 +111,25 @@ cal3m.buf.clear(); cal3m.n = 0
 for k in range(5):
     t += 0.1
     x -= 0.1
-    cal3m.add(t, x, 0.0, 0.0, v=-1.0, wz=0.0)
+    cal3m.add(t, x, 0.0, 0.0, x, wz=0.0)
 for k in range(5):
     t += 0.1
     x += 0.1
-    cal3m.add(t, x, 0.0, 0.0, v=1.0, wz=0.0)
+    cal3m.add(t, x, 0.0, 0.0, x, wz=0.0)
 check('autocal 혼합(왕복) 창 측정 없음', cal3m.n == 0)
 
 # EKF twist 노이즈 내성: 실제 전진 1 m/s 인데 twist 가 -0.1~+0.4 로 요동
 # (챔버 실측 재현) — 순간 부호로 창을 버리면 측정 0회가 되는 상황.
 # odo 는 잡음 평균만큼 과소평가되지만 0.8 게이트 안에서 측정이 성립해야 한다.
 cal_ns = YawAutocal(alpha=0.3, n_apply=3)
-t = x = 0.0
+t = x = mtr = 0.0
 random.seed(11)
 for k in range(300):
     t += 0.1
     x += 0.10
     v_noisy = 1.0 + random.gauss(0.0, 0.35)   # 간헐 음수 포함
-    cal_ns.add(t, x, 0.0, wrap(0.0 - TRUE), v=v_noisy, wz=0.0)
+    mtr += v_noisy * 0.1
+    cal_ns.add(t, x, 0.0, wrap(0.0 - TRUE), mtr, wz=0.0)
 check('autocal twist 노이즈 내성 (측정 발생+수렴)', cal_ns.n >= 3 and
       abs(wrap(cal_ns.corr - TRUE)) < math.radians(5),
       f'(n {cal_ns.n}, corr {math.degrees(cal_ns.corr):.1f}deg)')
@@ -140,8 +141,8 @@ jmp = 0
 for k in range(6):
     t += 0.1
     x += 0.1
-    cal_j.add(t, x, 0.0, 0.0, v=1.0, wz=0.0)
-if cal_j.add(t + 0.1, x + 5.0, 0.0, 0.0, v=1.0, wz=0.0) is not None:
+    cal_j.add(t, x, 0.0, 0.0, x, wz=0.0)
+if cal_j.add(t + 0.1, x + 5.0, 0.0, 0.0, x + 0.1, wz=0.0) is not None:
     jmp += 1
 check('autocal GPS 점프 기각', jmp == 0)
 
@@ -149,9 +150,9 @@ check('autocal GPS 점프 기각', jmp == 0)
 # 등곡률 호에서 chord 방위 = 중간점 방위)
 cal3b = YawAutocal()
 t = 0.0
-cal3b.add(t, 0.0, 0.0, 0.0, v=1.0, wz=0.0)
+cal3b.add(t, 0.0, 0.0, 0.0, 0.0, wz=0.0)
 t += 0.1
-cal3b.add(t, 0.1, 0.0, 0.0, v=1.0, wz=1.0)    # 급회전 → 보류
+cal3b.add(t, 0.1, 0.0, 0.0, 0.1, wz=1.0)     # 급회전 → 보류
 check('autocal 급회전 보류 (창 유지)', len(cal3b.buf) == 1)
 
 # 곡선 주행: 반경 5 m 호를 따라 돌 때 중간점 헤딩 대조로 오프셋이 맞아야
@@ -163,7 +164,7 @@ for k in range(2000):
     a = w * t
     hdg_true = wrap(a + math.pi / 2)          # 접선 방위
     cal_arc.add(t, R * math.cos(a), R * math.sin(a),
-                wrap(hdg_true - TRUE), v=R * w, wz=w)
+                wrap(hdg_true - TRUE), R * w * t, wz=w)
 check('autocal 곡선 주행 수렴', cal_arc.n > 3 and
       abs(wrap(cal_arc.corr - TRUE)) < math.radians(5),
       f'(corr {math.degrees(cal_arc.corr):.1f}deg, n {cal_arc.n})')
@@ -175,7 +176,7 @@ still = 0
 for k in range(100):
     t += 0.1
     if cal4.add(t, random.gauss(0, 0.3), random.gauss(0, 0.3), 0.0,
-                v=0.05, wz=0.0) is not None:
+                0.05 * t, wz=0.0) is not None:
         still += 1
 check('autocal 정지 게이트 (측정 0)', still == 0)
 
@@ -187,13 +188,13 @@ early = 0
 while x < 0.9:
     t += 0.1
     x += 0.1
-    if cal6.add(t, x, 0.0, 0.0, v=1.0, wz=0.0, cov=0.04) is not None:
+    if cal6.add(t, x, 0.0, 0.0, x, wz=0.0, cov=0.04) is not None:
         early += 1
 check('autocal 품질 적응 d_req (열화 fix 0.9m 측정 0)', early == 0)
 while x < 2.5:                    # 10*sqrt(0.04)=2.0 m 넘기면 성립
     t += 0.1
     x += 0.1
-    cal6.add(t, x, 0.0, 0.0, v=1.0, wz=0.0, cov=0.04)
+    cal6.add(t, x, 0.0, 0.0, x, wz=0.0, cov=0.04)
 check('autocal 품질 적응 d_req (2m 초과 시 측정)', cal6.n >= 1)
 
 # n_apply 전에는 active 금지 (표본 부족 상태의 섣부른 적용 방지)
@@ -202,7 +203,7 @@ t = x = 0.0
 while cal5.n < 5:
     t += 0.1
     x += 0.1
-    cal5.add(t, x, 0.0, 0.0, v=1.0, wz=0.0)
+    cal5.add(t, x, 0.0, 0.0, x, wz=0.0)
 check('autocal n_apply 전 inactive', not cal5.active and cal5.n == 5)
 
 # --- wrap ----------------------------------------------------------------

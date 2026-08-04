@@ -151,28 +151,31 @@ class YawAutocal:
     창은 비중첩(측정 후 buf 초기화)이라 EMA 표본이 서로 독립이고,
     벡터(복소) EMA 라 +-180도 경계에서도 평균이 붕괴하지 않는다."""
 
-    def __init__(self, v_min=0.15, wz_max=0.5, d_min=0.8, t_max=12.0,
+    def __init__(self, wz_max=0.5, d_min=0.8, t_max=12.0,
                  alpha=0.15, n_apply=6):
-        self.v_min, self.wz_max = v_min, wz_max
+        self.wz_max = wz_max
         self.d_min, self.t_max = d_min, t_max
         self.alpha, self.n_apply = alpha, n_apply
-        self.buf = []            # (t, x, y, hdg, cov, dv) — 양질 표본
-        self._t_prev = None
+        self.buf = []            # (t, x, y, hdg, cov, meter) — 양질 표본
         self.zr = self.zi = 0.0
         self.n = 0
         self.corr = 0.0          # 추정 보정 [rad] — active 일 때만 신뢰
         self.active = False
 
-    def add(self, t, x, y, hdg, v, wz, cov=0.0):
-        """양질 fix 1표본 투입. 측정이 성립하면 그 오차각[rad]을 반환."""
-        dt = 0.0 if self._t_prev is None else min(1.0, max(0.0, t - self._t_prev))
-        self._t_prev = t
+    def add(self, t, x, y, hdg, meter, wz, cov=0.0):
+        """양질 fix 1표본 투입. 측정이 성립하면 그 오차각[rad]을 반환.
+
+        meter: 호출자가 적산한 부호 있는 주행계 [m] (odom twist 를 odom
+        수신율로 적분). 처음에는 fix 표본 간 dt 로 v 를 적분했는데, GPS
+        표본이 성길 때(dt 캡) odo 가 구조적으로 과소평가되어 챔버에서
+        유효 측정까지 기각했다(8 m 전진에 1측정). 적산을 30 Hz odom
+        콜백으로 옮기면 표본률과 무관하게 정확하다."""
         if abs(wz) > self.wz_max:
             return None          # 급회전: 표본 보류 (창은 유지)
-        self.buf.append((t, x, y, hdg, max(0.0, cov), v * dt))
+        self.buf.append((t, x, y, hdg, max(0.0, cov), meter))
         while self.buf and t - self.buf[0][0] > self.t_max:
             self.buf.pop(0)
-        odo = sum(b[5] for b in self.buf)
+        odo = meter - self.buf[0][5]
         if odo < -0.3:
             self.buf.clear()     # 확실한 순후진 — 재전진 시 오염 이월 방지
             return None
@@ -180,7 +183,11 @@ class YawAutocal:
         d = math.hypot(x - x0, y - y0)
         d_req = max(self.d_min,
                     10.0 * math.sqrt(max(b[4] for b in self.buf)))
-        if d < d_req or odo < 0.8 * d:
+        # 0.6: U-턴(~160도 호)까지는 등곡률 특성상 chord 방위 = 중간점
+        # 방위가 유지되므로 임계는 후진/점프 차단만 하면 된다(순후진
+        # odo<0, GPS 점프 chord>>odo 는 여전히 기각). 실bag 4종 검증:
+        # 0.6 에서도 122 의 오염 창은 계속 기각, 정상 수렴값 변화 <2도.
+        if d < d_req or odo < 0.6 * d:
             return None
         err = wrap(math.atan2(y - y0, x - x0)
                    - self.buf[len(self.buf) // 2][3])
@@ -249,7 +256,6 @@ class MapAnchorNode(Node):
         # docstring 참조. max_cov 는 '양질 fix' 판정(sigma ~22 cm; RTK
         # float 급이면 통과). 비활성화는 yaw_autocal:=false.
         self.declare_parameter('yaw_autocal', True)
-        self.declare_parameter('yaw_autocal_min_v', 0.15)    # [m/s]
         self.declare_parameter('yaw_autocal_min_d', 0.8)     # [m]
         self.declare_parameter('yaw_autocal_max_cov', 0.05)  # [m^2]
         self.declare_parameter('gps_topic', 'odometry/gps')
@@ -286,14 +292,14 @@ class MapAnchorNode(Node):
         self.autocal = None
         if self.get_parameter('yaw_autocal').value:
             self.autocal = YawAutocal(
-                v_min=self.get_parameter('yaw_autocal_min_v').value,
                 d_min=self.get_parameter('yaw_autocal_min_d').value)
         self.autocal_max_cov = self.get_parameter('yaw_autocal_max_cov').value
         self._cal_active = False
 
         self.odom = None            # (x, y, yaw) in odom frame
-        self.odom_v = 0.0           # ekf_odom 전진 속도 (엔코더 부호)
         self.odom_wz = 0.0
+        self.odom_meter = 0.0       # 부호 있는 주행계 [m] (twist 적분)
+        self._odom_meter_t = None
         self.imu_yaw = None         # absolute yaw (map convention)
         self.imu_yaw_uncal = None   # raw + 정적 yaw_offset (autocal 미적용)
         self.t = None               # map->odom translation [x, y]
@@ -395,8 +401,15 @@ class MapAnchorNode(Node):
     def on_odom(self, m):
         p = m.pose.pose.position
         self.odom = (p.x, p.y, yaw_of(m.pose.pose.orientation))
-        self.odom_v = m.twist.twist.linear.x
         self.odom_wz = m.twist.twist.angular.z
+        # 주행계 적산 (autocal 의 전진 일관성 판정용) — GPS 표본률과
+        # 무관하게 odom 수신율(~30 Hz)로 적분해야 정확하다
+        now = self.now_s()
+        if self._odom_meter_t is not None:
+            dt = now - self._odom_meter_t
+            if 0.0 < dt < 0.5:
+                self.odom_meter += m.twist.twist.linear.x * dt
+        self._odom_meter_t = now
         # yaw anchor updates at odom rate (imu+odom both live even without GPS)
         if self.imu_yaw is not None:
             target = wrap(self.imu_yaw - self.odom[2])
@@ -433,7 +446,7 @@ class MapAnchorNode(Node):
                  (self.last_cov is not None
                   and self.last_cov <= self.autocal_max_cov)):
             e = self.autocal.add(self.now_s(), gx, gy, self.imu_yaw_uncal,
-                                 self.odom_v, self.odom_wz,
+                                 self.odom_meter, self.odom_wz,
                                  self.last_cov or 0.0)
             if e is not None:
                 self.pub_corr.publish(Float32(data=self.autocal.corr))
