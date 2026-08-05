@@ -74,17 +74,21 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'anchor_yaw_offset', default_value='1.8012',
             description='Static yaw added to the IMU absolute yaw [rad]. '
-                        '1.8012 rad = +103.2 deg, measured 2026-08-05 after '
-                        'the magnetic anchor was restored (VPE ABSOLUTE + '
-                        'HSI applied): forward-motion GPS course minus IMU '
-                        'yaw was constant at +103.2 deg over 4 segments, '
-                        'residual RMS 7.4 deg (= GPS bearing noise at 6 m '
-                        'without RTK). This is the sensor mounting rotation '
-                        'plus declination — it is now REPEATABLE across '
-                        'power cycles, which it was not before (08-03 +62, '
-                        '08-04 +170 deg were per-session gyro drift). Set 0 '
-                        'for chamber fault injection / A-B. The online '
-                        'estimator still trims the residual.'),
+                        '1.8012 rad = +103.2 deg — the mounting rotation '
+                        'that remains after the 2026-08-05 magnetic anchor '
+                        'restoration (VPE ABSOLUTE + HSI applied). It is a '
+                        'SEED, not a calibration: post-analysis of the three '
+                        '08-05 sessions measured +104.4 / +117.7 / +94.1 deg '
+                        '(span 23.6 deg, and 11-21 deg drift at the SAME 5 m '
+                        'grid cell within 30 min), so the true value wanders '
+                        'with local magnetic distortion. Seeding it still '
+                        'beats 0 (100 deg error at boot vs ~10-20), but '
+                        'anchor_yaw_autocal MUST stay on to trim the rest '
+                        'and the RC forward gate before autonomy stays '
+                        'MANDATORY. Repeatability across a power cycle is '
+                        'still UNVERIFIED (the three sessions shared one '
+                        'sensor power-on). Set 0 for chamber fault '
+                        'injection / A-B.'),
         DeclareLaunchArgument(
             'anchor_yaw_autocal', default_value='true',
             description='Online yaw-offset estimation from GPS course vs '
