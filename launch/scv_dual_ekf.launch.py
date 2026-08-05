@@ -141,11 +141,11 @@ def generate_launch_description():
             name='rko_lio',
             output='screen',
             parameters=[
+                # scv.yaml 이 아니다: 그 파일은 rko 자체 런치용 평문 형식이라
+                # Node(parameters=[...]) 로 넘기면 rcl 파싱이 실패한다.
                 os.path.join(get_package_share_directory('rko_lio'),
-                             'config', 'scv.yaml'),
-                {'use_sim_time': use_sim_time,
-                 'publish_odom_tf': False,
-                 'odom_topic': '/odometry/fast_lio'},
+                             'config', 'scv_ros_params.yaml'),
+                {'use_sim_time': use_sim_time},
             ],
             condition=IfCondition(PythonExpression([
                 "'", with_fastlio, "'.lower() in ('true','1') and '",
