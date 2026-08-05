@@ -72,15 +72,19 @@ def generate_launch_description():
                         'current estimate (false "recovered" fixes warped '
                         'the graph map, 2026-07-30 field). <=0 disables.'),
         DeclareLaunchArgument(
-            'anchor_yaw_offset', default_value='0.0',
+            'anchor_yaw_offset', default_value='1.8012',
             description='Static yaw added to the IMU absolute yaw [rad]. '
-                        'Field 2026-08-04: the VectorNav yaw reference is '
-                        'NOT magnetically anchored — per-session arbitrary '
-                        'offsets were measured (+62 deg on 08-03, +170 deg '
-                        'on 08-04, opposite-to-goal driving). So no static '
-                        'value can be correct; this arg exists for fault '
-                        'injection in the chamber and for A/B only. The '
-                        'online estimator (anchor_yaw_autocal) is the fix.'),
+                        '1.8012 rad = +103.2 deg, measured 2026-08-05 after '
+                        'the magnetic anchor was restored (VPE ABSOLUTE + '
+                        'HSI applied): forward-motion GPS course minus IMU '
+                        'yaw was constant at +103.2 deg over 4 segments, '
+                        'residual RMS 7.4 deg (= GPS bearing noise at 6 m '
+                        'without RTK). This is the sensor mounting rotation '
+                        'plus declination — it is now REPEATABLE across '
+                        'power cycles, which it was not before (08-03 +62, '
+                        '08-04 +170 deg were per-session gyro drift). Set 0 '
+                        'for chamber fault injection / A-B. The online '
+                        'estimator still trims the residual.'),
         DeclareLaunchArgument(
             'anchor_yaw_autocal', default_value='true',
             description='Online yaw-offset estimation from GPS course vs '
