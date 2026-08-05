@@ -1,0 +1,52 @@
+# SCV (Hunter 2.0, VLP-32C + VectorNav VN-100) — 2026-08-05
+# 현행 FAST-LIO2 velodyne.yaml 과 파라미터 정합: 같은 토픽, 같은 extrinsic,
+# blind 2.0. time_scale 은 실bag 실측(velodyne time 필드 = 초 단위, 스캔 끝
+# 기준 음수 상대값)에 맞춰 1.0 — nclt 기본(1e-3)과 다르니 주의.
+laserMapping:
+    ros__parameters:
+      common:
+        dataset: "scv"
+        lid_topic: "/velodyne_points"
+        imu_topic: "/vectornav/imu"
+        time_sync_en: false
+
+      preprocess:
+        lidar_type: 2                # 2 = Velodyne
+        vertical_resolution: 32
+        blind: 2.0
+        time_scale: 1.0              # 초 단위 (bag 실측)
+
+      mapping:
+        acc_cov: 0.1
+        gyr_cov: 0.1
+        b_acc_cov: 0.0001
+        b_gyr_cov: 0.0001
+        fov_degree: 360
+        det_range: 100.0
+        extrinsic_est_en: false      # FAST-LIO 현행 설정과 동일 (고정 extrinsic)
+        extrinsic_T: [ 0.34, 0.0, 0.17 ]
+        extrinsic_R: [ 1.0, 0.0, 0.0,
+                       0.0, 1.0, 0.0,
+                       0.0, 0.0, 1.0 ]
+      publish:
+        path_publish_en: false
+        scan_publish_en: false
+        scan_effect_pub_en: false
+        dense_publish_en: false
+        scan_bodyframe_pub_en: false
+
+      path_save_en: false
+      pcd_save:
+        pcd_save_en: false
+        interval: -1
+
+      feature_extract_enable: false
+      point_filter_num: 6
+      max_iteration: 3
+      filter_size_surf: 0.5
+      filter_size_map: 0.5
+      cube_side_length: 1000.0
+
+      ivox_grid_resolution: 0.5
+      ivox_nearby_type: 18
+      esti_plane_threshold: 0.1

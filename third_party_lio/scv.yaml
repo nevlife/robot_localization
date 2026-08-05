@@ -1,0 +1,22 @@
+# SCV (Hunter 2.0, VLP-32C + VectorNav VN-100) — 2026-08-05
+# bag 의 tf_static 에 velodyne/vectornav 프레임이 없으므로 외부 캘리브레이션을
+# 명시한다. 기준체(base)는 IMU: imu2base 항등, lidar2base 는 현행
+# FAST-LIO2 velodyne.yaml 의 extrinsic (0.34, 0, 0.17)+I 를 그대로 사용 —
+# 세 LIO 가 같은 값을 쓰게 해 비교 변수를 하나 줄인다. (이 값 자체와 URDF
+# 계산값 (0.070, 0, 0.195) 의 27 cm 불일치 판정은 별도 과제.)
+imu_topic: /vectornav/imu
+lidar_topic: /velodyne_points
+base_frame: vectornav
+imu_frame: vectornav
+lidar_frame: velodyne
+extrinsic_imu2base_quat_xyzw_xyz: [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+extrinsic_lidar2base_quat_xyzw_xyz: [0.0, 0.0, 0.0, 1.0, 0.34, 0.0, 0.17]
+odom_topic: /rko_lio/odom
+publish_local_map: false
+publish_deskewed_scan: false
+max_range: 100.0
+min_range: 2.0          # FAST-LIO blind 2.0 과 정합
+# velodyne time 필드는 '스캔 끝 기준 음수 상대 초' — 자동 감지가 절대값으로
+# 오인해 전 스캔 드랍(±194 s delta 오류). 상대 해석을 강제한다.
+lidar_timestamps:
+  force_relative: true
