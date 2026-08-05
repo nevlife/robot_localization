@@ -43,9 +43,20 @@ def generate_launch_description():
                         'without /tf_static.'),
         DeclareLaunchArgument(
             'with_fastlio', default_value='true',
-            description='Start FAST-LIO here (false when it runs elsewhere '
-                        'or when replaying a bag that already contains '
-                        '/odometry/fast_lio)'),
+            description='Start the LiDAR-inertial odometry here (false when '
+                        'it runs elsewhere or when replaying a bag that '
+                        'already contains /odometry/fast_lio). Which '
+                        'algorithm starts is chosen by lio_source.'),
+        DeclareLaunchArgument(
+            'lio_source', default_value='fastlio',
+            description='LiDAR-inertial odometry algorithm: '
+                        'fastlio (FAST-LIO2, default/field-proven) | '
+                        'fasterlio (Faster-LIO, iVox) | '
+                        'rko (RKO-LIO). All three publish the SAME topic '
+                        '/odometry/fast_lio in the odom frame so ekf_odom '
+                        'fuses them identically — do not remap downstream. '
+                        'None of them may publish odom->base_link TF (the '
+                        'EKF owns it).'),
         DeclareLaunchArgument(
             'map_anchor_pcd', default_value='0',
             description='1/true: hybrid anchoring — consume /pcd/global_pose '
@@ -83,7 +94,11 @@ def generate_launch_description():
                         'receiver cold-start garbage). Raise to effectively '
                         'disable for A/B testing.'),
 
-        # LiDAR-inertial odometry (primary precision source)
+        # LiDAR-inertial odometry (primary precision source).
+        # Three interchangeable implementations, selected by lio_source.
+        # Contract each must satisfy: publish nav_msgs/Odometry on
+        # /odometry/fast_lio in the odom frame, and publish NO
+        # odom->base_link TF (ekf_odom owns that transform).
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource([
                 os.path.join(get_package_share_directory('fast_lio'),
@@ -93,7 +108,48 @@ def generate_launch_description():
                 'use_sim_time': use_sim_time,
                 'config_file': 'velodyne.yaml',
             }.items(),
-            condition=IfCondition(with_fastlio),
+            condition=IfCondition(PythonExpression([
+                "'", with_fastlio, "'.lower() in ('true','1') and '",
+                LaunchConfiguration('lio_source'), "' == 'fastlio'"])),
+        ),
+
+        # Faster-LIO: same iEKF as FAST-LIO2 but iVox instead of ikd-Tree.
+        # Its node publishes on 'Odometry' (node-relative), so remap.
+        Node(
+            package='faster_lio',
+            executable='run_mapping_online',
+            name='laserMapping',
+            output='screen',
+            parameters=[
+                os.path.join(
+                    get_package_share_directory('faster_lio'),
+                    'config', 'velodyne_scv.yaml'),
+                {'use_sim_time': use_sim_time},
+            ],
+            remappings=[('Odometry', '/odometry/fast_lio')],
+            condition=IfCondition(PythonExpression([
+                "'", with_fastlio, "'.lower() in ('true','1') and '",
+                LaunchConfiguration('lio_source'), "' == 'fasterlio'"])),
+        ),
+
+        # RKO-LIO: IMU-loose, no per-sensor tuning. publish_odom_tf:=false
+        # keeps the EKF's ownership of odom->base_link (the package would
+        # otherwise broadcast it and fight the filter).
+        Node(
+            package='rko_lio',
+            executable='online_node',
+            name='rko_lio',
+            output='screen',
+            parameters=[
+                os.path.join(get_package_share_directory('rko_lio'),
+                             'config', 'scv.yaml'),
+                {'use_sim_time': use_sim_time,
+                 'publish_odom_tf': False,
+                 'odom_topic': '/odometry/fast_lio'},
+            ],
+            condition=IfCondition(PythonExpression([
+                "'", with_fastlio, "'.lower() in ('true','1') and '",
+                LaunchConfiguration('lio_source'), "' == 'rko'"])),
         ),
 
         # GNSS antenna static TF fallback. navsat_transform refuses to
