@@ -206,6 +206,34 @@ while cal5.n < 5:
     cal5.add(t, x, 0.0, 0.0, x, wz=0.0)
 check('autocal n_apply 전 inactive', not cal5.active and cal5.n == 5)
 
+# 제자리 선회 오염 차단: 28초에 걸쳐 240도 회전(평균 0.15 rad/s 로
+# wz_max 0.5 아래)하는 동안 GPS 는 조금씩 표류한다. 2026-08-06 필드에서
+# 이 조합이 meas +75/-59도를 만들어 corr 을 +12.6도까지 밀어올렸다.
+cal_spin = YawAutocal()
+t = 0.0
+spin = 0
+random.seed(3)
+for k in range(280):          # 0.1초 간격 28초
+    t += 0.1
+    yaw = math.radians(240.0 * k / 280.0)      # 서서히 240도 회전
+    x = random.gauss(0, 0.25)                  # 제자리 GPS 표류
+    y = random.gauss(0, 0.25)
+    if cal_spin.add(t, x, y, wrap(yaw), 0.05 * t, wz=0.15, cov=0.02) is not None:
+        spin += 1
+check('제자리 선회 중 측정 차단', spin == 0, f'(측정 {spin}회)')
+
+# 완만한 곡선(창 내 yaw 변화 작음)은 계속 유효해야 한다 — 과차단 방지
+cal_ok = YawAutocal(alpha=0.4, n_apply=3)
+t = 0.0
+R, w = 12.0, 0.06            # 반경 12 m, 0.72 m/s → 창 12초에 약 41도
+for k in range(1500):
+    t += 0.1
+    a = w * t
+    cal_ok.add(t, R * math.cos(a), R * math.sin(a),
+               wrap(wrap(a + math.pi / 2) - TRUE), R * w * t, wz=w, cov=0.02)
+check('완만한 곡선은 계속 측정됨', cal_ok.n > 5,
+      f'(측정 {cal_ok.n}회, corr {math.degrees(cal_ok.corr):.1f}deg)')
+
 # --- wrap ----------------------------------------------------------------
 check('wrap(3π) == π', abs(wrap(3 * math.pi) - math.pi) < 1e-9 or
       abs(wrap(3 * math.pi) + math.pi) < 1e-9)

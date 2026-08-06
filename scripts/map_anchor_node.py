@@ -152,8 +152,9 @@ class YawAutocal:
     벡터(복소) EMA 라 +-180도 경계에서도 평균이 붕괴하지 않는다."""
 
     def __init__(self, wz_max=0.5, d_min=0.8, t_max=12.0,
-                 alpha=0.15, n_apply=6):
+                 alpha=0.15, n_apply=6, max_yaw_span=math.radians(40.0)):
         self.wz_max = wz_max
+        self.max_yaw_span = max_yaw_span
         self.d_min, self.t_max = d_min, t_max
         self.alpha, self.n_apply = alpha, n_apply
         self.buf = []            # (t, x, y, hdg, cov, meter) — 양질 표본
@@ -175,6 +176,18 @@ class YawAutocal:
         self.buf.append((t, x, y, hdg, max(0.0, cov), meter))
         while self.buf and t - self.buf[0][0] > self.t_max:
             self.buf.pop(0)
+        # 창 안에서 방위가 크게 변했으면 '중간점 yaw = chord 방위' 전제가
+        # 깨진다. 순간 각속도 게이트(wz_max)만으로는 못 잡는다 — 2026-08-06
+        # 필드에서 TURNAROUND 가 28 초에 걸쳐 240도 돌았는데 평균 0.15 rad/s
+        # 라 문턱(0.5) 아래였고, 그 사이 측정이 +75.1 / -59.1 도로 오염돼
+        # corr 이 -0.1 -> +12.6 도까지 튀었다(그 map 프레임 위에서 자율주행이
+        # 진행됐다). 창 전체 yaw 스팬으로 직접 막는다.
+        span = 0.0
+        for k in range(1, len(self.buf)):
+            span += abs(wrap(self.buf[k][3] - self.buf[k - 1][3]))
+        if span > self.max_yaw_span:
+            self.buf = self.buf[-1:]   # 회전 이전 표본과 이어붙지 않게 끊는다
+            return None
         odo = meter - self.buf[0][5]
         if odo < -0.3:
             self.buf.clear()     # 확실한 순후진 — 재전진 시 오염 이월 방지
