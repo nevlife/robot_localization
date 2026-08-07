@@ -15,7 +15,10 @@ from rclpy.node import Node
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Imu, NavSatFix
 
-sys.path.insert(0, '/home/ppub/scv_ws/src/robot_localization/scripts')
+import os
+# 절대경로 금지 — 차량(/home/scv/SCV_park)에서 실행되지 않는다.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                '..', 'scripts'))
 from map_anchor_node import MapAnchorNode  # noqa: E402
 
 FAULT = math.radians(90.0)

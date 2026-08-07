@@ -5,3 +5,8 @@ doc/html
 *.cproject
 *.project
 *.settings
+
+# 파이썬 바이트코드 — 커밋되면 배포 시 차량의 미추적 .pyc 와 충돌해
+# merge 가 막힌다 (2026-08-07 차량 반영에서 실제로 걸렸다).
+__pycache__/
+*.py[cod]
