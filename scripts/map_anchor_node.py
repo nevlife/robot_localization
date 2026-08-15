@@ -35,7 +35,7 @@ import rclpy
 from rclpy.node import Node
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Imu, NavSatFix
-from std_msgs.msg import Float32, String
+from std_msgs.msg import Bool, Float32, String
 from geometry_msgs.msg import PoseWithCovarianceStamped, TransformStamped
 from tf2_ros import TransformBroadcaster
 
@@ -271,6 +271,21 @@ class MapAnchorNode(Node):
         self.declare_parameter('yaw_autocal', True)
         self.declare_parameter('yaw_autocal_min_d', 0.8)     # [m]
         self.declare_parameter('yaw_autocal_max_cov', 0.05)  # [m^2]
+        # ---- 정지 yaw 초기화 (2026-08-13) --------------------------------
+        # pcd_pose_topic 포즈의 yaw 까지 신뢰해 autocal 을 즉시 시드하고
+        # th 를 스냅한다. 시작 정지 상태에서 스캔 정합(standstill_yaw_init)
+        # 이 발행하는 절대 포즈로 '전진 수렴' 절차를 정지 상태에서 대체.
+        # 기존 하이브리드(x,y 앵커만)와 달리 방위까지 소비하므로 신뢰
+        # 가능한 정합기에서만 켤 것.
+        self.declare_parameter('pcd_yaw_init', False)
+        # ---- 수렴 게이트 판정 (map_anchor/yaw_converged) -----------------
+        # 자율 전환 가부의 기계 판정: (a) 정지 정합 시드 완료, 또는
+        # (b) autocal n>=min_n & 누적 주행>=min_d & 최근 window 동안
+        #     corr 변화 폭 <= delta_deg.
+        self.declare_parameter('yaw_conv_window_s', 20.0)
+        self.declare_parameter('yaw_conv_delta_deg', 1.0)
+        self.declare_parameter('yaw_conv_min_n', 12)
+        self.declare_parameter('yaw_conv_min_d', 5.0)
         self.declare_parameter('gps_topic', 'odometry/gps')
         self.declare_parameter('odom_topic', '/odom')
         self.declare_parameter('imu_topic', '/vectornav/imu')
@@ -333,6 +348,11 @@ class MapAnchorNode(Node):
         self.create_subscription(NavSatFix, '/gps/fix_gated', self.on_fix, 30)
         self.pub_mode = self.create_publisher(String, 'map_anchor/mode', 10)
         self.pub_corr = self.create_publisher(Float32, 'map_anchor/yaw_corr', 10)
+        self.pub_conv = self.create_publisher(Bool, 'map_anchor/yaw_converged', 10)
+        self.corr_hist = []          # (t, corr) — 수렴 판정 창
+        self.ext_yaw_done = False    # 정지 정합 시드 적용됨
+        self._conv_last = None
+        self.create_timer(1.0, self.eval_convergence)
         if self.pcd_topic:
             self.create_subscription(Odometry, self.pcd_topic, self.on_pcd, 30)
         self.get_logger().info(
@@ -341,6 +361,38 @@ class MapAnchorNode(Node):
 
     def now_s(self):
         return self.get_clock().now().nanoseconds / 1e9
+
+    def eval_convergence(self):
+        """yaw 수렴 게이트 판정 (1 Hz). 운용자/행동계획이 자율 전환 가부를
+        기계적으로 읽을 수 있는 신호 — 8/13 필드에서 '10 m 전진' 고정
+        규칙이 세션 오프셋 −32도에 불충분했던 것의 근본 대책."""
+        now = self.now_s()
+        conv = False
+        if self.ext_yaw_done:
+            conv = True                       # 정지 정합 시드 완료
+        elif self.autocal is not None:
+            self.corr_hist.append((now, self.autocal.corr))
+            w = self.get_parameter('yaw_conv_window_s').value
+            self.corr_hist = [(t, c) for t, c in self.corr_hist
+                              if now - t <= w + 1.0]
+            win = [c for t, c in self.corr_hist if now - t <= w]
+            if (self.autocal.active
+                    and self.autocal.n >= self.get_parameter('yaw_conv_min_n').value
+                    and abs(self.odom_meter) >= self.get_parameter('yaw_conv_min_d').value
+                    and len(win) >= 3):
+                ref = win[-1]
+                delta = max(abs(wrap(c - ref)) for c in win)
+                conv = delta <= math.radians(
+                    self.get_parameter('yaw_conv_delta_deg').value)
+        self.pub_conv.publish(Bool(data=conv))
+        if conv != self._conv_last:
+            self._conv_last = conv
+            n = self.autocal.n if self.autocal is not None else 0
+            c = math.degrees(self.autocal.corr) if self.autocal is not None else 0.0
+            self.get_logger().info(
+                f'yaw 수렴 게이트: {"통과" if conv else "미충족"} '
+                f'(corr {c:+.1f}deg, n={n}, 주행 {self.odom_meter:.1f}m'
+                f'{", 정지정합" if self.ext_yaw_done else ""})')
 
     def set_mode(self, mode):
         if mode == self.mode:
@@ -397,6 +449,24 @@ class MapAnchorNode(Node):
         self.last_pcd = (self.now_s(),
                          p.x + self.pcd_off[0], p.y + self.pcd_off[1],
                          yaw_of(m.pose.pose.orientation))
+        # 정지 yaw 초기화: 정합 포즈의 절대 방위로 autocal 을 시드하고
+        # th 를 즉시 스냅한다 (EMA 대기 없이 첫 waypoint 부터 정렬).
+        # 1회만 — 이후 정밀화는 주행 중 autocal 이 잇는다.
+        if self.get_parameter('pcd_yaw_init').value \
+                and self.autocal is not None and not self.ext_yaw_done \
+                and self.imu_yaw_uncal is not None and self.odom is not None:
+            corr = wrap(self.last_pcd[3] - self.imu_yaw_uncal)
+            a = self.autocal
+            a.zr, a.zi = math.cos(corr), math.sin(corr)
+            a.corr, a.n, a.active = corr, max(a.n, a.n_apply), True
+            self.ext_yaw_done = True
+            self._cal_active = True   # ENGAGED 대회전 경로 재발동 방지
+            self.th = wrap(self.last_pcd[3] - self.odom[2])
+            self.anchored = False     # 다음 절대 소스로 즉시 재스냅
+            self.pub_corr.publish(Float32(data=corr))
+            self.get_logger().warn(
+                f'yaw INIT from scan match (정지 정합): corr '
+                f'{math.degrees(corr):+.1f}deg — th snapped, re-anchoring')
         # yield only to TRUSTED RTK — a suspect (gate-rejected) RTK stream
         # must not silence the matcher, it is the reference we hold against
         if self.odom is None or not self.th_init or \

@@ -65,6 +65,13 @@ def generate_launch_description():
                         'Requires the SCV_NEW_MAP0721-family map whose georef '
                         'offset matches map_anchor pcd_offset_e/n.'),
         DeclareLaunchArgument(
+            'scan_yaw_init', default_value='0',
+            description='1/true: 정지 스캔 정합 초기화 소비 — '
+                        'standstill_yaw_init.py 가 발행하는 '
+                        '/scan_yaw_init/pose 를 앵커+yaw 시드로 사용 '
+                        '(pcd_offset 0, pcd_yaw_init on). '
+                        "'10 m 전진 수렴' 절차의 정지 대체 (2026-08-13)."),
+        DeclareLaunchArgument(
             'anchor_rtk_gate_m', default_value='3.0',
             description='RTK re-trust innovation gate [m]: an RTK-flagged '
                         'fix regains snap authority only after rtk_gate_n '
@@ -227,9 +234,22 @@ def generate_launch_description():
             parameters=[{
                 'use_sim_time': use_sim_time,
                 'pcd_pose_topic': PythonExpression(
-                    ["'/pcd/global_pose' if '",
+                    ["'/scan_yaw_init/pose' if '",
+                     LaunchConfiguration('scan_yaw_init'),
+                     "' in ('1', 'true', 'True') else "
+                     "('/pcd/global_pose' if '",
                      LaunchConfiguration('map_anchor_pcd'),
-                     "' in ('1', 'true', 'True') else ''"]),
+                     "' in ('1', 'true', 'True') else '')"]),
+                # 정지 정합 포즈는 우리 map 프레임 그대로 — 오프셋 0
+                'pcd_offset_e': PythonExpression(
+                    ["0.0 if '", LaunchConfiguration('scan_yaw_init'),
+                     "' in ('1', 'true', 'True') else 45.518"]),
+                'pcd_offset_n': PythonExpression(
+                    ["0.0 if '", LaunchConfiguration('scan_yaw_init'),
+                     "' in ('1', 'true', 'True') else 26.015"]),
+                'pcd_yaw_init': PythonExpression(
+                    ["'", LaunchConfiguration('scan_yaw_init'),
+                     "' in ('1', 'true', 'True')"]),
                 'rtk_gate_m': ParameterValue(
                     LaunchConfiguration('anchor_rtk_gate_m'),
                     value_type=float),
