@@ -12,6 +12,8 @@ publishMapToOdomTransform must stay disabled (publish_map_odom_tf:=false).
 """
 
 import os
+from launch.substitutions import PathJoinSubstitution
+from launch_ros.substitutions import FindPackageShare
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
@@ -171,8 +173,8 @@ def generate_launch_description():
             parameters=[
                 # scv.yaml 이 아니다: 그 파일은 rko 자체 런치용 평문 형식이라
                 # Node(parameters=[...]) 로 넘기면 rcl 파싱이 실패한다.
-                os.path.join(get_package_share_directory('rko_lio'),
-                             'config', 'scv_ros_params.yaml'),
+                PathJoinSubstitution([FindPackageShare('rko_lio'),
+                             'config', 'scv_ros_params.yaml']),
                 {'use_sim_time': use_sim_time},
             ],
             condition=IfCondition(PythonExpression([
