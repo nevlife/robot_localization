@@ -151,9 +151,8 @@ def generate_launch_description():
             name='laserMapping',
             output='screen',
             parameters=[
-                os.path.join(
-                    get_package_share_directory('faster_lio'),
-                    'config', 'velodyne_scv.yaml'),
+                PathJoinSubstitution([FindPackageShare('faster_lio'),
+                    'config', 'velodyne_scv.yaml']),
                 {'use_sim_time': use_sim_time},
             ],
             remappings=[('Odometry', '/odometry/fast_lio')],
