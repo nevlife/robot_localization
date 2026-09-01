@@ -361,6 +361,9 @@ install(PROGRAMS
   scripts/current_speed_to_twist.py
   scripts/scaled_nhc_twist.py
   scripts/gps_quality_gate.py
+  scripts/gps_fix_gate.py
+  scripts/map_anchor_node.py
+  scripts/wheel_odom_adapter.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

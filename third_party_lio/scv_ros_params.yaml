@@ -1,0 +1,24 @@
+# SCV — ROS 파라미터 파일 형식 (Node(parameters=[...]) 용).
+# rko_lio 자체 런치(odometry.launch.py)는 config/scv.yaml(평문 형식)을 쓰고,
+# scv_dual_ekf.launch.py 는 노드를 직접 띄우므로 ros__parameters 구조가 필요하다.
+# 두 파일의 값은 동일하게 유지할 것.
+/**:
+  ros__parameters:
+    imu_topic: /vectornav/imu
+    lidar_topic: /velodyne_points
+    base_frame: vectornav
+    imu_frame: vectornav
+    lidar_frame: velodyne
+    # imu2base 항등, lidar2base 는 현행 FAST-LIO2 velodyne.yaml 과 동일 값
+    extrinsic_imu2base_quat_xyzw_xyz: [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+    extrinsic_lidar2base_quat_xyzw_xyz: [0.0, 0.0, 0.0, 1.0, 0.34, 0.0, 0.17]
+    odom_topic: /odometry/fast_lio
+    odom_frame: odom
+    publish_odom_tf: false      # EKF 가 odom->base_link 를 소유
+    publish_local_map: false
+    publish_deskewed_scan: false
+    max_range: 100.0
+    min_range: 2.0
+    # velodyne time 필드는 스캔 끝 기준 음수 상대 초 — 자동 감지가 절대값으로
+    # 오인해 전 스캔을 버린다(±194 s delta 오류)
+    lidar_timestamps.force_relative: true

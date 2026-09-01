@@ -1,0 +1,35 @@
+diff --git a/rko_lio/ros/base_node.cpp b/rko_lio/ros/base_node.cpp
+index b56e439..79952fd 100644
+--- a/rko_lio/ros/base_node.cpp
++++ b/rko_lio/ros/base_node.cpp
+@@ -75,6 +75,7 @@ BaseNode::BaseNode(const std::string& node_name, const rclcpp::NodeOptions& opti
+ 
+   // tf
+   invert_odom_tf = node->declare_parameter<bool>("invert_odom_tf", invert_odom_tf);
++  publish_odom_tf = node->declare_parameter<bool>("publish_odom_tf", publish_odom_tf);
+   tf_buffer = std::make_shared<tf2_ros::Buffer>(node->get_clock());
+   tf_listener = std::make_shared<tf2_ros::TransformListener>(*tf_buffer);
+   tf_broadcaster = std::make_unique<tf2_ros::TransformBroadcaster>(*node);
+@@ -280,6 +281,9 @@ void BaseNode::publish_odometry(const core::State& state,
+ }
+ 
+ void BaseNode::publish_tf(const core::State& state) const {
++  if (!publish_odom_tf) {
++    return;
++  }
+   geometry_msgs::msg::TransformStamped transform_msg;
+   transform_msg.header.stamp = utils::to_ros_time(state.time);
+   if (invert_odom_tf) {
+diff --git a/rko_lio/ros/base_node.hpp b/rko_lio/ros/base_node.hpp
+index 4143d0d..dff1c43 100644
+--- a/rko_lio/ros/base_node.hpp
++++ b/rko_lio/ros/base_node.hpp
+@@ -92,6 +92,8 @@ public:
+ 
+   bool dump_results = false;
+   bool invert_odom_tf = false;
++  // SCV: EKF 가 odom->base_link TF 를 소유 — LIO 는 odometry 토픽만 내야 한다
++  bool publish_odom_tf = true;
+   bool publish_lidar_acceleration = false;
+   bool publish_deskewed_scan = false;
+   bool publish_local_map = false;
